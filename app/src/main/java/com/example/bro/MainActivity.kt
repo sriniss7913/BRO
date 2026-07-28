@@ -190,6 +190,8 @@ fun BroApp() {
         agentJob?.cancel()
         agentJob = scope.launch {
             isRunningTask = true
+            var tempScreen: ScreenState? = null
+            var tempActions: List<com.example.bro.model.Action> = emptyList()
             try {
                 executeGoalWithPlanner(
                     context = context,
@@ -197,10 +199,8 @@ fun BroApp() {
                     userOriginalPrompt = commandText,
                     messages = messages,
                     onComplete = { goal, screen, actions ->
-                        feedbackGoal = goal
-                        feedbackScreen = screen
-                        feedbackActions = actions
-                        showFeedbackDialog = true
+                        tempScreen = screen
+                        tempActions = actions
                     }
                 )
             } catch (e: CancellationException) {
@@ -209,6 +209,10 @@ fun BroApp() {
                 messages.add(Message("❌ Error: ${e.message}", false))
             } finally {
                 isRunningTask = false
+                feedbackGoal = resolvedGoal
+                feedbackScreen = tempScreen
+                feedbackActions = tempActions
+                showFeedbackDialog = true
             }
         }
     }
