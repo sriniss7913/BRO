@@ -115,8 +115,9 @@ object UserConversationMemory {
             }
         }
 
-        // Pattern 2: App/Medium Specifier ("in sms app", "in whatsapp", "not in whatsapp")
-        if (lowerNew.startsWith("in ") || lowerNew.contains("app") || lowerNew.contains("not in ")) {
+        // Pattern 2: App/Medium Specifier ("in sms app", "in whatsapp", "not in whatsapp") - Only for short prompts (<4 words)
+        val wordCount = newPrompt.trim().split("\\s+".toRegex()).size
+        if (wordCount <= 4 && (lowerNew.startsWith("in ") || lowerNew.startsWith("on ") || lowerNew.contains("app") || lowerNew.contains("not in "))) {
             return "${lastTurn.resolvedGoal} ($newPrompt)"
         }
 
