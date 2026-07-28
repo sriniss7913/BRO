@@ -32,10 +32,11 @@ class ActionExecutor(
             val joined = fullText.joinToString(" ").lowercase()
             val isProfileScreen = (joined.contains("disappearing messages") || joined.contains("chat lock") ||
                 joined.contains("media visibility")) &&
-                // Confirm it's NOT the chat screen: profile screen has NO message input box
                 !joined.contains("type a message")
-            if (isProfileScreen) {
-                Log.d("BRO_EXECUTOR", "Auto-escaping WhatsApp Profile Info screen — pressing BACK")
+            val isMetaAiScreen = (joined.contains("send message to meta ai") || joined.contains("back meta ai")) &&
+                !joined.contains("type a message")
+            if (isProfileScreen || isMetaAiScreen) {
+                Log.d("BRO_EXECUTOR", "Auto-escaping WhatsApp Profile / Meta AI screen — pressing BACK")
                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
                 try { Thread.sleep(1000) } catch (e: Exception) {}
                 return true // Skip this bad action, let next LLM step see the chat screen

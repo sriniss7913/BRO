@@ -199,8 +199,10 @@ class ScreenReader {
 
     private fun isMetaAiCategoryChip(text: String): Boolean {
         val normalized = text.trim().lowercase()
-        if (normalized.length > 30) return false
-        return normalized in META_AI_CHIPS || normalized == "ask meta ai"
+        return normalized.contains("meta ai") ||
+            normalized.contains("ask meta") ||
+            normalized.contains("send message to meta ai") ||
+            normalized in META_AI_CHIPS
     }
 
     private fun isGenericEmptyContainer(element: UiElement): Boolean {
