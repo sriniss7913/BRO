@@ -124,6 +124,20 @@ fun BroApp() {
         }
     }
 
+    var providerMode by remember {
+        mutableStateOf(prefs.getString("provider_mode", "GROQ") ?: "GROQ")
+    }
+    var localPcUrl by remember {
+        mutableStateOf(prefs.getString("local_pc_url", "http://192.168.1.35:1234/v1/") ?: "http://192.168.1.35:1234/v1/")
+    }
+    var localModelName by remember {
+        mutableStateOf(prefs.getString("local_model_name", "local-model") ?: "local-model")
+    }
+
+    com.example.bro.network.GroqRepository.providerMode = providerMode
+    com.example.bro.network.GroqRepository.localPcUrl = localPcUrl
+    com.example.bro.network.GroqRepository.localModelName = localModelName
+
     // Pulsing Animation for BRO Core Orb
     val infiniteTransition = rememberInfiniteTransition(label = "broGlow")
     val orbScale by infiniteTransition.animateFloat(
@@ -773,26 +787,76 @@ fun BroApp() {
                             .height(380.dp)
                     ) {
                         item {
-                            Text("Groq API Key:", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = JarvisTextPrimary)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            OutlinedTextField(
-                                value = apiKey,
-                                onValueChange = { apiKey = it },
-                                placeholder = { Text("gsk_...", color = JarvisTextSecondary) },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = JarvisCyan,
-                                    unfocusedBorderColor = Color(0x4400E5FF),
-                                    focusedTextColor = JarvisTextPrimary,
-                                    unfocusedTextColor = JarvisTextPrimary
-                                )
-                            )
+                            Text("AI Provider Mode:", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = JarvisCyan)
                             Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                "Get a free API key at console.groq.com",
-                                fontSize = 11.sp,
-                                color = JarvisTextSecondary
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                FilterChip(
+                                    selected = providerMode == "GROQ",
+                                    onClick = { providerMode = "GROQ" },
+                                    label = { Text("🌐 Groq Cloud", fontSize = 11.sp) }
+                                )
+                                FilterChip(
+                                    selected = providerMode == "LOCAL_PC",
+                                    onClick = { providerMode = "LOCAL_PC" },
+                                    label = { Text("💻 Local PC Model", fontSize = 11.sp) }
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            if (providerMode == "GROQ") {
+                                Text("Groq API Key:", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisTextPrimary)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedTextField(
+                                    value = apiKey,
+                                    onValueChange = { apiKey = it },
+                                    placeholder = { Text("gsk_...", color = JarvisTextSecondary) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = JarvisCyan,
+                                        unfocusedBorderColor = Color(0x4400E5FF),
+                                        focusedTextColor = JarvisTextPrimary,
+                                        unfocusedTextColor = JarvisTextPrimary
+                                    )
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "Get a free API key at console.groq.com",
+                                    fontSize = 11.sp,
+                                    color = JarvisTextSecondary
+                                )
+                            } else {
+                                Text("Local PC Server Endpoint (OpenAI API):", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
+                                Text("Host on PC via LM Studio / Ollama (e.g. http://192.168.1.35:1234/v1/):", fontSize = 10.sp, color = JarvisTextSecondary)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedTextField(
+                                    value = localPcUrl,
+                                    onValueChange = { localPcUrl = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = JarvisCyan,
+                                        unfocusedBorderColor = Color(0x4400E5FF),
+                                        focusedTextColor = JarvisTextPrimary,
+                                        unfocusedTextColor = JarvisTextPrimary
+                                    )
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text("Model Name:", fontSize = 11.sp, color = JarvisTextPrimary)
+                                OutlinedTextField(
+                                    value = localModelName,
+                                    onValueChange = { localModelName = it },
+                                    placeholder = { Text("local-model", color = JarvisTextSecondary) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = JarvisCyan,
+                                        unfocusedBorderColor = Color(0x4400E5FF),
+                                        focusedTextColor = JarvisTextPrimary,
+                                        unfocusedTextColor = JarvisTextPrimary
+                                    )
+                                )
+                            }
 
                             Spacer(modifier = Modifier.height(16.dp))
 
@@ -805,7 +869,7 @@ fun BroApp() {
                                 onValueChange = { systemPromptInput = it },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(200.dp),
+                                    .height(180.dp),
                                 textStyle = LocalTextStyle.current.copy(
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
@@ -839,13 +903,23 @@ fun BroApp() {
                                 Button(
                                     onClick = {
                                         GroqRepository.apiKey = apiKey.trim()
-                                        prefs.edit().putString("groq_api_key", apiKey.trim()).apply()
+                                        GroqRepository.providerMode = providerMode
+                                        GroqRepository.localPcUrl = localPcUrl.trim()
+                                        GroqRepository.localModelName = localModelName.trim()
+
+                                        prefs.edit()
+                                            .putString("groq_api_key", apiKey.trim())
+                                            .putString("provider_mode", providerMode)
+                                            .putString("local_pc_url", localPcUrl.trim())
+                                            .putString("local_model_name", localModelName.trim())
+                                            .apply()
+
                                         com.example.bro.planner.SystemPromptManager.saveSystemPrompt(context, systemPromptInput)
-                                        Toast.makeText(context, "💾 LLM Rules & Key Saved!", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "💾 Saved Provider ($providerMode) & Settings!", Toast.LENGTH_SHORT).show()
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = JarvisCyan)
                                 ) {
-                                    Text("Save Rules", fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                                    Text("Save Settings", fontSize = 11.sp, color = Color.Black, fontWeight = FontWeight.Bold)
                                 }
                             }
                         }

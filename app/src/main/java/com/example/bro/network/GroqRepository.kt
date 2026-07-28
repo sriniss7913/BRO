@@ -13,6 +13,9 @@ class GroqRepository(
         // Do not ship a permanent API key inside the APK.
         // We'll move this to secure/local configuration later.
         var apiKey: String = "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"
+        var providerMode: String = "GROQ" // "GROQ" or "LOCAL_PC"
+        var localPcUrl: String = "http://192.168.1.35:1234/v1/"
+        var localModelName: String = "local-model"
 
         private val MODELS = listOf(
             "llama-3.3-70b-versatile",
@@ -51,6 +54,33 @@ class GroqRepository(
         }
 
         lastCallMs = System.currentTimeMillis()
+
+        // LOCAL PC MODEL SERVER BRANCH
+        if (providerMode == "LOCAL_PC") {
+            val customApi = RetrofitClient.createCustomApi(localPcUrl)
+            val request = GroqRequest(
+                model = localModelName.ifBlank { "local-model" },
+                messages = listOf(
+                    Message(role = "system", content = systemPrompt),
+                    Message(role = "user", content = userPrompt)
+                )
+            )
+            Log.d("BRO_GROQ", "Sending prompt to Local PC Model at $localPcUrl (model=$localModelName)")
+            try {
+                val response = customApi.chat(authorization = "Bearer local-key", request = request)
+                if (response.isSuccessful) {
+                    val body = response.body() ?: throw Exception("Empty response from Local PC Model")
+                    return body.choices.firstOrNull()?.message?.content
+                        ?: throw Exception("No choice returned from Local PC Model")
+                } else {
+                    val err = response.errorBody()?.string() ?: response.message()
+                    throw Exception("Local PC Model error (${response.code()}): $err")
+                }
+            } catch (e: Exception) {
+                Log.e("BRO_GROQ", "Local PC Model connection error: ${e.message}")
+                throw Exception("Cannot connect to PC Server at '$localPcUrl'. Ensure LM Studio / Ollama is running and phone is on same Wi-Fi. Error: ${e.message}")
+            }
+        }
 
         val key = apiKey.trim()
 
