@@ -1,6 +1,7 @@
 package com.example.bro.agent
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import java.io.File
@@ -14,6 +15,9 @@ import java.io.File
 object OnDeviceLlmManager {
     private const val TAG = "BRO_ON_DEVICE"
     private const val DEFAULT_MODELS_DIR = "models"
+    private const val PREFS_NAME = "bro_prefs"
+    private const val KEY_MODEL_DIR = "on_device_model_dir"
+    private const val KEY_SELECTED_MODEL = "on_device_selected_model"
 
     var customModelDirPath: String = "/sdcard/BRO/"
 
@@ -23,9 +27,22 @@ object OnDeviceLlmManager {
     val isModelLoaded: Boolean get() = llmInference != null || currentModelName.isNotBlank()
     val loadedModelName: String get() = currentModelName
 
+    fun init(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        customModelDirPath = prefs.getString(KEY_MODEL_DIR, "/sdcard/BRO/") ?: "/sdcard/BRO/"
+        val savedModel = prefs.getString(KEY_SELECTED_MODEL, "") ?: ""
+        if (savedModel.isNotBlank()) {
+            val dir = getModelsDir(context)
+            val file = File(dir, savedModel)
+            if (file.exists()) {
+                currentModelName = savedModel
+                Log.d(TAG, "Restored selected model on startup: $savedModel")
+            }
+        }
+    }
+
     /**
      * Returns the directory where model files should be placed.
-     * Tries customModelDirPath, /sdcard/BRO/, /sdcard/Download/, or app files dir.
      */
     fun getModelsDir(context: Context): File {
         var rawPath = customModelDirPath.trim()
@@ -97,14 +114,17 @@ object OnDeviceLlmManager {
 
                 llmInference = LlmInference.createFromOptions(context, options)
                 currentModelName = modelFileName
+                saveSelectedModel(context, modelFileName)
                 Log.d(TAG, "MediaPipe Task Model loaded successfully: $modelFileName")
                 Result.success("Loaded MediaPipe Model '$modelFileName' (${modelFile.length() / 1024 / 1024}MB)")
             } else if (lowerName.endsWith(".onnx")) {
                 currentModelName = modelFileName
+                saveSelectedModel(context, modelFileName)
                 Log.d(TAG, "ONNX Navigation Model selected: $modelFileName")
                 Result.success("Selected ONNX Pointer Network '$modelFileName' (${modelFile.length() / 1024} KB)")
             } else {
                 currentModelName = modelFileName
+                saveSelectedModel(context, modelFileName)
                 Result.success("Loaded Model '$modelFileName'")
             }
         } catch (e: Exception) {
@@ -113,6 +133,11 @@ object OnDeviceLlmManager {
             currentModelName = ""
             Result.failure(Exception("Failed to load model '$modelFileName': ${e.message}"))
         }
+    }
+
+    private fun saveSelectedModel(context: Context, modelFileName: String) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString(KEY_SELECTED_MODEL, modelFileName).apply()
     }
 
     /**

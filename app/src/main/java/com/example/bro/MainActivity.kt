@@ -141,6 +141,7 @@ fun BroApp() {
     com.example.bro.network.GroqRepository.localPcUrl = localPcUrl
     com.example.bro.network.GroqRepository.localModelName = localModelName
     com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = customModelDirPath
+    com.example.bro.agent.OnDeviceLlmManager.init(context)
 
     // Pulsing Animation for BRO Core Orb
     val infiniteTransition = rememberInfiniteTransition(label = "broGlow")
