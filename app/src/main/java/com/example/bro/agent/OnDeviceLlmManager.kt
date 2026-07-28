@@ -32,19 +32,17 @@ object OnDeviceLlmManager {
         customModelDirPath = prefs.getString(KEY_MODEL_DIR, "/sdcard/BRO/") ?: "/sdcard/BRO/"
         val savedModel = prefs.getString(KEY_SELECTED_MODEL, "") ?: ""
         if (savedModel.isNotBlank()) {
-            val dir = getModelsDir(context)
-            val file = File(dir, savedModel)
-            if (file.exists()) {
+            val file = findModelFile(context, savedModel)
+            if (file != null && file.exists()) {
                 currentModelName = savedModel
-                Log.d(TAG, "Restored selected model on startup: $savedModel")
+                Log.d(TAG, "Restored selected model on startup: $savedModel at ${file.absolutePath}")
             }
         }
     }
 
-    /**
-     * Returns the directory where model files should be placed.
-     */
-    fun getModelsDir(context: Context): File {
+    private fun getPossibleDirs(context: Context): List<File> {
+        val dirs = mutableListOf<File>()
+
         var rawPath = customModelDirPath.trim()
         if (rawPath.startsWith("/storage/emulated/0/")) {
             rawPath = rawPath.replace("/storage/emulated/0/", "/sdcard/")
@@ -53,57 +51,68 @@ object OnDeviceLlmManager {
         if (rawPath.isNotBlank()) {
             val customDir = File(rawPath)
             if (customDir.exists() && customDir.isDirectory) {
-                return customDir
+                dirs.add(customDir)
             }
         }
 
         val broDir = File("/sdcard/BRO")
-        if (broDir.exists() && broDir.isDirectory) {
-            return broDir
-        }
+        if (broDir.exists() && broDir.isDirectory) dirs.add(broDir)
 
         val downloadDir = File("/sdcard/Download")
-        if (downloadDir.exists() && downloadDir.isDirectory) {
-            return downloadDir
-        }
+        if (downloadDir.exists() && downloadDir.isDirectory) dirs.add(downloadDir)
 
-        val defaultDir = File(context.getExternalFilesDir(null), DEFAULT_MODELS_DIR)
-        if (!defaultDir.exists()) defaultDir.mkdirs()
-        return defaultDir
+        val appDir = File(context.getExternalFilesDir(null), DEFAULT_MODELS_DIR)
+        if (!appDir.exists()) appDir.mkdirs()
+        dirs.add(appDir)
+
+        return dirs.distinctBy { it.absolutePath }
     }
 
     /**
-     * Lists all available model files (.onnx, .task, .bin, .gguf) in the target directory.
+     * Finds a model file by name across all candidate directories.
+     */
+    fun findModelFile(context: Context, modelFileName: String): File? {
+        val dirs = getPossibleDirs(context)
+        for (dir in dirs) {
+            val file = File(dir, modelFileName)
+            if (file.exists() && file.isFile) {
+                return file
+            }
+        }
+        return null
+    }
+
+    /**
+     * Lists all available model files (.onnx, .task, .bin, .gguf) across all candidate directories.
      */
     fun listAvailableModels(context: Context): List<String> {
-        val dir = getModelsDir(context)
-        val files = dir.listFiles() ?: return emptyList()
-        return files
-            .filter { it.isFile && (
-                it.name.lowercase().endsWith(".onnx") ||
-                it.name.lowercase().endsWith(".task") ||
-                it.name.lowercase().endsWith(".bin") ||
-                it.name.lowercase().endsWith(".gguf")
-            ) }
-            .map { it.name }
+        val dirs = getPossibleDirs(context)
+        val result = mutableSetOf<String>()
+        for (dir in dirs) {
+            val files = dir.listFiles() ?: continue
+            for (f in files) {
+                if (f.isFile) {
+                    val nameLower = f.name.lowercase()
+                    if (nameLower.endsWith(".onnx") || nameLower.endsWith(".task") || nameLower.endsWith(".bin") || nameLower.endsWith(".gguf")) {
+                        result.add(f.name)
+                    }
+                }
+            }
+        }
+        return result.toList()
     }
 
     /**
-     * Load a model from the models directory.
+     * Load a model by file name.
      */
     fun loadModel(context: Context, modelFileName: String): Result<String> {
         return try {
             close()
 
-            val dir = getModelsDir(context)
-            val modelFile = File(dir, modelFileName)
-            if (!modelFile.exists()) {
-                return Result.failure(Exception(
-                    "Model file not found at: ${modelFile.absolutePath}"
-                ))
-            }
+            val modelFile = findModelFile(context, modelFileName)
+                ?: return Result.failure(Exception("Model file '$modelFileName' not found in any directory"))
 
-            Log.d(TAG, "Loading on-device model: ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
+            Log.d(TAG, "Loading on-device model: ${modelFile.absolutePath} (${modelFile.length() / 1024} KB)")
 
             val lowerName = modelFileName.lowercase()
             if (lowerName.endsWith(".task")) {
