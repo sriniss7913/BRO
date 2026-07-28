@@ -791,17 +791,22 @@ fun BroApp() {
                             Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 FilterChip(
                                     selected = providerMode == "GROQ",
                                     onClick = { providerMode = "GROQ" },
-                                    label = { Text("🌐 Groq Cloud", fontSize = 11.sp) }
+                                    label = { Text("🌐 Groq", fontSize = 10.sp) }
                                 )
                                 FilterChip(
                                     selected = providerMode == "LOCAL_PC",
                                     onClick = { providerMode = "LOCAL_PC" },
-                                    label = { Text("💻 Local PC Model", fontSize = 11.sp) }
+                                    label = { Text("💻 PC", fontSize = 10.sp) }
+                                )
+                                FilterChip(
+                                    selected = providerMode == "ON_DEVICE",
+                                    onClick = { providerMode = "ON_DEVICE" },
+                                    label = { Text("📱 On-Device", fontSize = 10.sp) }
                                 )
                             }
                             Spacer(modifier = Modifier.height(10.dp))
@@ -827,7 +832,7 @@ fun BroApp() {
                                     fontSize = 11.sp,
                                     color = JarvisTextSecondary
                                 )
-                            } else {
+                            } else if (providerMode == "LOCAL_PC") {
                                 Text("Local PC Server Endpoint (OpenAI API):", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
                                 Text("Host on PC via LM Studio / Ollama (e.g. http://192.168.1.35:1234/v1/):", fontSize = 10.sp, color = JarvisTextSecondary)
                                 Spacer(modifier = Modifier.height(4.dp))
@@ -856,6 +861,92 @@ fun BroApp() {
                                         unfocusedTextColor = JarvisTextPrimary
                                     )
                                 )
+                            } else if (providerMode == "ON_DEVICE") {
+                                var onDeviceStatus by remember { mutableStateOf(
+                                    if (com.example.bro.agent.OnDeviceLlmManager.isModelLoaded)
+                                        "✅ Loaded: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelName}"
+                                    else "⚪ No model loaded"
+                                ) }
+                                var isLoadingModel by remember { mutableStateOf(false) }
+                                var selectedModelFile by remember { mutableStateOf("") }
+
+                                Text("📱 On-Device Model (Zero Network)", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
+                                Text(
+                                    "Place .task model file at:\n${com.example.bro.agent.OnDeviceLlmManager.getModelsDir(context).absolutePath}/",
+                                    fontSize = 9.sp,
+                                    color = JarvisTextSecondary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Status
+                                Surface(
+                                    color = if (com.example.bro.agent.OnDeviceLlmManager.isModelLoaded) Color(0xFF0A2E1A) else Color(0xFF1A1A2E),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        onDeviceStatus,
+                                        modifier = Modifier.padding(8.dp),
+                                        fontSize = 11.sp,
+                                        color = if (com.example.bro.agent.OnDeviceLlmManager.isModelLoaded) Color(0xFF10B981) else JarvisTextSecondary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Available models
+                                val availableModels = com.example.bro.agent.OnDeviceLlmManager.listAvailableModels(context)
+                                if (availableModels.isEmpty()) {
+                                    Text("⚠️ No model files found. Copy a .task file to the path above.", fontSize = 10.sp, color = Color(0xFFF59E0B))
+                                } else {
+                                    Text("Available Models:", fontSize = 11.sp, color = JarvisTextPrimary)
+                                    availableModels.forEach { modelFile ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                modelFile,
+                                                fontSize = 10.sp,
+                                                color = if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) Color(0xFF10B981) else Color.White,
+                                                modifier = Modifier.weight(1f)
+                                            )
+                                            Button(
+                                                onClick = {
+                                                    selectedModelFile = modelFile
+                                                    isLoadingModel = true
+                                                    onDeviceStatus = "⏳ Loading $modelFile..."
+                                                    scope.launch {
+                                                        val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                            com.example.bro.agent.OnDeviceLlmManager.loadModel(context, modelFile)
+                                                        }
+                                                        isLoadingModel = false
+                                                        result.onSuccess { msg ->
+                                                            onDeviceStatus = "✅ $msg"
+                                                        }
+                                                        result.onFailure { err ->
+                                                            onDeviceStatus = "❌ ${err.message}"
+                                                        }
+                                                    }
+                                                },
+                                                enabled = !isLoadingModel,
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) Color(0xFF10B981) else JarvisCyan
+                                                ),
+                                                modifier = Modifier.height(28.dp),
+                                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                            ) {
+                                                Text(
+                                                    if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) "Loaded" else "Load",
+                                                    fontSize = 9.sp,
+                                                    color = Color.Black,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             Spacer(modifier = Modifier.height(16.dp))
@@ -1062,12 +1153,62 @@ private fun actionSignature(action: com.example.bro.model.Action): String = buil
 }
 
 private fun screenSignature(screen: ScreenState): String {
-    val labels = screen.nodes.take(12).mapNotNull {
-        it.text?.take(25) ?: it.contentDescription?.take(25)
-    }.joinToString("|")
-    return "${screen.packageName}#${screen.nodes.size}#$labels"
-}
+    val nodes = screen.nodes
+        .mapNotNull { node ->
+            val label = (
+                    node.text?.trim()
+                        ?: node.contentDescription?.trim()
+                    )
+                ?.replace(Regex("\\s+"), " ")
+                ?.take(60)
 
+            if (label.isNullOrBlank()) {
+                null
+            } else {
+                "${node.id}:$label"
+            }
+        }
+        .take(40)
+        .joinToString("|")
+
+    return "${screen.packageName}#${screen.nodes.size}#$nodes"
+}
+private suspend fun waitForScreenChange(
+    service: BroAccessibilityService,
+    screenReader: ScreenReader,
+    previousSignature: String,
+    timeoutMs: Long = 5000L,
+    pollMs: Long = 250L
+): Boolean {
+
+    val start = System.currentTimeMillis()
+
+    while (System.currentTimeMillis() - start < timeoutMs) {
+
+        delay(pollMs)
+
+        val root = service.getRoot() ?: continue
+        val currentScreen = screenReader.read(root)
+        val currentSignature = screenSignature(currentScreen)
+
+        if (currentSignature != previousSignature) {
+
+            Log.d(
+                "BRO_STATE",
+                "UI changed after ${System.currentTimeMillis() - start}ms"
+            )
+
+            return true
+        }
+    }
+
+    Log.w(
+        "BRO_STATE",
+        "UI did not change within ${timeoutMs}ms"
+    )
+
+    return false
+}
 suspend fun executeGoalWithPlanner(
     context: Context,
     goalStr: String,
@@ -1191,7 +1332,7 @@ suspend fun executeGoalWithPlanner(
         recentActionSigs.add(actionSig)
         if (recentActionSigs.size > 6) recentActionSigs.removeAt(0)
 
-        if (visitedStateActions[stateKey]!! >= 2) {
+        if (visitedStateActions[stateKey]!! >= 4) {
             messages.add(Message("⚠️ Stopping task: detected repeated state+action loop.", false))
             returnToBroApp(context)
             return
@@ -1296,22 +1437,89 @@ suspend fun executeGoalWithPlanner(
                     }
                 }
 
-                ActionType.CLICK, ActionType.TYPE, ActionType.SCROLL, ActionType.SWIPE, ActionType.BACK, ActionType.HOME -> {
-                    val success = executor.execute(act)
-                    memory.remember(act, success, if (success) "Executed ${act.type}" else "Failed ${act.type}")
+                ActionType.CLICK,
+                ActionType.TYPE,
+                ActionType.SCROLL,
+                ActionType.SWIPE,
+                ActionType.BACK,
+                ActionType.HOME -> {
 
-                    // Auto-finish immediately if Send button click succeeded
-                    if (success && act.type == ActionType.CLICK) {
-                        val summaryLower = (act.summary ?: "").lowercase()
-                        if (summaryLower.contains("send") || summaryLower.contains("sent")) {
-                            messages.add(Message("✅ Message sent successfully! Task completed.", false))
+                    val beforeSignature = screenSignature(screen)
+
+                    Log.d(
+                        "BRO_STATE",
+                        "Executing ${action.type}, state=$beforeSignature"
+                    )
+
+                    val success = executor.execute(action)
+
+                    if (!success) {
+                        memory.remember(
+                            action,
+                            false,
+                            "Execution failed"
+                        )
+
+                        Log.w(
+                            "BRO_STATE",
+                            "${action.type} execution failed"
+                        )
+
+                        delay(500)
+                        continue
+                    }
+
+                    memory.remember(
+                        action,
+                        true,
+                        "Executed ${action.type}"
+                    )
+
+                    // Keep your existing Send completion shortcut.
+                    if (action.type == ActionType.CLICK) {
+                        val summaryLower =
+                            (action.summary ?: "").lowercase()
+
+                        if (
+                            summaryLower.contains("send") ||
+                            summaryLower.contains("sent")
+                        ) {
+                            messages.add(
+                                Message(
+                                    "✅ Message sent successfully! Task completed.",
+                                    false
+                                )
+                            )
+
                             returnToBroApp(context)
                             return
                         }
                     }
 
-                    val stepDelay = if (actionsToExecute.size > 1) 800L else 2500L
-                    delay(stepDelay)
+                    val changed = waitForScreenChange(
+                        service = service,
+                        screenReader = screenReader,
+                        previousSignature = beforeSignature
+                    )
+
+                    memory.remember(
+                        action,
+                        true,
+                        if (changed)
+                            "Action executed and UI changed"
+                        else
+                            "Action executed but UI remained unchanged"
+                    )
+
+                    Log.d(
+                        "BRO_STATE",
+                        "Action=${action.type}, UI_CHANGED=$changed"
+                    )
+
+                    // Small settling delay only after change was detected.
+                    if (changed) {
+                        delay(300)
+                    }
                 }
 
                 ActionType.WAIT -> {

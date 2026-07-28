@@ -55,6 +55,24 @@ class GroqRepository(
 
         lastCallMs = System.currentTimeMillis()
 
+        // ON-DEVICE MODEL BRANCH
+        if (providerMode == "ON_DEVICE") {
+            if (!com.example.bro.agent.OnDeviceLlmManager.isModelLoaded) {
+                throw Exception("No on-device model loaded. Go to Settings → 📱 On-Device → Load Model")
+            }
+            Log.d("BRO_GROQ", "Sending prompt to On-Device Model (${com.example.bro.agent.OnDeviceLlmManager.loadedModelName})")
+            try {
+                val result = com.example.bro.agent.OnDeviceLlmManager.generateResponse(systemPrompt, userPrompt)
+                if (result.isBlank()) {
+                    throw Exception("On-device model returned empty response")
+                }
+                return result
+            } catch (e: Exception) {
+                Log.e("BRO_GROQ", "On-Device Model error: ${e.message}")
+                throw Exception("On-Device Model error: ${e.message}")
+            }
+        }
+
         // LOCAL PC MODEL SERVER BRANCH
         if (providerMode == "LOCAL_PC") {
             var baseUrl = localPcUrl.trim()

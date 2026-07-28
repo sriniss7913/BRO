@@ -81,12 +81,17 @@ class ScreenReader {
      * Element IDs are preserved so NodeRepository stays in sync with click targets.
      */
     fun toPrompt(screen: ScreenState): String {
-        // Token Optimization: In BRO main app, don't send 80 internal chat UI elements
-        if (screen.packageName == "com.example.bro" || screen.packageName.endsWith(".bro")) {
+
+        // BRO's own UI is irrelevant to external-app planning.
+        if (
+            screen.packageName == "com.example.bro" ||
+            screen.packageName.endsWith(".bro")
+        ) {
             return "Current App: com.example.bro (BRO Main Screen)\n"
         }
 
         val builder = StringBuilder()
+
         builder.append("Current App: ${screen.packageName}\n\n")
 
         if (screen.nodes.isEmpty()) {
@@ -94,104 +99,251 @@ class ScreenReader {
             return builder.toString()
         }
 
-        // Detect if we are inside a WhatsApp chat thread (NOT the main list or search screen)
-        // Signals: WhatsApp + Back button + (Chat input box OR Voice/Video Call header icons OR end-to-end encryption text)
         val isWhatsApp = screen.packageName == "com.whatsapp"
+
+        fun label(element: UiElement): String {
+            return element.text?.trim()
+                .orEmpty()
+                .ifBlank {
+                    element.contentDescription?.trim().orEmpty()
+                }
+        }
+
+        /*
+         * Detect WhatsApp chat.
+         */
         val hasBackButton = screen.nodes.any {
-            val t = (it.text ?: it.contentDescription ?: "").toString().lowercase()
-            t == "back" && it.clickable
+            label(it).equals("Back", ignoreCase = true)
         }
-        val hasChatThreadIndicators = screen.nodes.any {
-            val t = (it.text ?: it.contentDescription ?: "").toString().lowercase()
-            val textRaw = (it.text ?: it.contentDescription ?: "").toString().trim()
-            textRaw.equals("Message", ignoreCase = true) ||
-            t.contains("type a message") ||
-            t.contains("video call") ||
-            t.contains("voice call") ||
-            t.contains("end-to-end")
+
+        val hasChatIndicators = screen.nodes.any {
+            val value = label(it).lowercase()
+
+            it.editable ||
+                    value == "message" ||
+                    value.contains("type a message") ||
+                    value.contains("video call") ||
+                    value.contains("voice call") ||
+                    value.contains("end-to-end")
         }
-        val isInsideChat = isWhatsApp && hasBackButton && hasChatThreadIndicators
+
+        val isInsideChat =
+            isWhatsApp &&
+                    hasBackButton &&
+                    hasChatIndicators
+
+        /*
+         * Find high-priority interactive elements.
+         *
+         * These MUST reach the planner even if there are
+         * hundreds of message-history nodes.
+         */
+        val priorityElements = screen.nodes.filter { element ->
+
+            val value = label(element).lowercase()
+
+            element.editable ||
+
+                    value == "send" ||
+                    value.contains("send message") ||
+
+                    value.contains("type a message") ||
+                    value == "message" ||
+
+                    value.contains("search") ||
+
+                    value.contains("attach") ||
+                    value.contains("camera") ||
+                    value.contains("emoji") ||
+
+                    value == "back"
+        }
 
         if (isInsideChat) {
-            builder.append("STATUS: YOU ARE INSIDE THE CHAT. Messages are visible below. Use TYPE on [CHAT INPUT BOX] to type. Use CLICK on Send to send.\n\n")
+
+            builder.append(
+                "STATUS: INSIDE WHATSAPP CHAT.\n"
+            )
+
+            builder.append(
+                "Choose actions only from CURRENT SCREEN elements. " +
+                        "TYPE requires an editable input element. " +
+                        "After typing, CLICK the Send element.\n\n"
+            )
         }
 
         builder.append("Screen Elements:\n")
 
-        var included = 0
-        val maxElements = 35  // Cap at 35 useful elements for token savings
+        val emittedIds = mutableSetOf<Int>()
         val seenTexts = mutableSetOf<String>()
 
-        // Track first few element IDs to identify header zone (first 4 elements in WhatsApp chat are header)
-        var elementIndex = 0
+        /*
+         * Helper for writing one element.
+         */
+        fun appendElement(element: UiElement) {
 
-        for (element in screen.nodes) {
-            if (included >= maxElements) break
-            elementIndex++
+            if (element.id in emittedIds) return
 
-            val text = element.text?.trim()
-            val description = element.contentDescription?.trim()
-            val displayText = text.orEmpty().ifBlank { description.orEmpty() }
+            val displayText = label(element)
 
-            // Filter out system UI overlays (battery %, notifications summary)
-            if (displayText.contains("Battery charging", ignoreCase = true) ||
-                displayText.contains("notifications", ignoreCase = true)
-            ) continue
+            if (
+                displayText.contains(
+                    "Battery charging",
+                    ignoreCase = true
+                ) ||
+                displayText.contains(
+                    "notifications",
+                    ignoreCase = true
+                )
+            ) {
+                return
+            }
 
-            val hasText = displayText.isNotBlank()
+            if (
+                displayText.isNotBlank() &&
+                isMetaAiCategoryChip(displayText)
+            ) {
+                return
+            }
 
-            val useful = hasText ||
-                element.editable ||
-                element.checkable ||
-                (element.clickable && !isGenericEmptyContainer(element))
+            val useful =
+                displayText.isNotBlank() ||
+                        element.editable ||
+                        element.checkable ||
+                        (
+                                element.clickable &&
+                                        !isGenericEmptyContainer(element)
+                                )
 
-            if (!useful) continue
+            if (!useful) return
 
-            if (hasText && isMetaAiCategoryChip(displayText)) continue
+            /*
+             * Deduplicate ordinary text, but NEVER deduplicate
+             * interactive/editable elements.
+             */
+            val dedupKey =
+                displayText
+                    .take(50)
+                    .lowercase()
 
-            // Trim long non-interactive text to save tokens
-            if (displayText.length > 50 && !element.editable && !element.clickable) continue
+            if (
+                !element.editable &&
+                !element.clickable &&
+                dedupKey.isNotBlank() &&
+                dedupKey in seenTexts
+            ) {
+                return
+            }
 
-            // Skip duplicate text
-            val dedupKey = displayText.take(40).lowercase()
-            if (!element.editable && seenTexts.contains(dedupKey)) continue
-            seenTexts.add(dedupKey)
-
-            // Determine if this is a header element inside a WhatsApp chat
-            // When inside chat: ALL clickable elements in the first ~8 positions are header
-            // (Back, Contact Name, Call, Video Call, More Options)
-            val isHeaderElement = isInsideChat && elementIndex <= 8 && !element.editable &&
-                element.clickable && !displayText.lowercase().let { d ->
-                    d.contains("send") || d.contains("type a message") ||
-                    d.contains("emoji") || d.contains("attach") || d.contains("camera")
-                }
+            if (dedupKey.isNotBlank()) {
+                seenTexts.add(dedupKey)
+            }
 
             builder.append("[${element.id}] ")
+
             builder.append(
-                displayText.take(40).ifBlank {
-                    (element.className ?: "Element").substringAfterLast('.')
-                }
+                displayText
+                    .take(60)
+                    .ifBlank {
+                        (element.className ?: "Element")
+                            .substringAfterLast('.')
+                    }
             )
 
-            if (element.editable) {
-                builder.append(" [CHAT INPUT BOX - TYPE HERE]")
-            } else if (isHeaderElement) {
-                builder.append(" [HEADER - DO NOT CLICK]")
-            } else if (element.clickable) {
-                builder.append(" [CLICK]")
+            when {
+
+                element.editable -> {
+                    builder.append(" [EDITABLE - TYPE HERE]")
+
+                    /*
+                     * Important:
+                     * node.text can contain the currently entered
+                     * message, so the planner can tell whether TYPE
+                     * already happened.
+                     */
+                    val currentText =
+                        element.text
+                            ?.trim()
+                            .orEmpty()
+
+                    if (currentText.isNotBlank()) {
+                        builder.append(
+                            " [CURRENT TEXT=\"${currentText.take(80)}\"]"
+                        )
+                    }
+                }
+
+                element.clickable -> {
+                    builder.append(" [CLICK]")
+                }
             }
+
             if (element.checkable) {
+
                 builder.append(" [CHK")
-                if (element.checked) builder.append(":1")
+
+                if (element.checked) {
+                    builder.append(":1")
+                }
+
                 builder.append("]")
             }
-            if (!element.enabled) builder.append(" [OFF]")
+
+            if (!element.enabled) {
+                builder.append(" [OFF]")
+            }
+
             builder.append('\n')
-            included++
+
+            emittedIds.add(element.id)
         }
 
-        if (screen.nodes.size > included) {
-            builder.append("...${screen.nodes.size - included} more\n")
+        /*
+         * PASS 1:
+         *
+         * Always send interactive controls first.
+         *
+         * This is the important fix.
+         */
+        priorityElements.forEach {
+            appendElement(it)
+        }
+
+        /*
+         * PASS 2:
+         *
+         * Then send useful normal elements for context.
+         */
+        val maxTotalElements = 40
+
+        for (element in screen.nodes) {
+
+            if (emittedIds.size >= maxTotalElements) {
+                break
+            }
+
+            /*
+             * Don't waste planner context on giant pieces of
+             * conversation history.
+             */
+            val displayText = label(element)
+
+            if (
+                displayText.length > 80 &&
+                !element.editable &&
+                !element.clickable
+            ) {
+                continue
+            }
+
+            appendElement(element)
+        }
+
+        if (screen.nodes.size > emittedIds.size) {
+
+            builder.append(
+                "...${screen.nodes.size - emittedIds.size} more elements omitted\n"
+            )
         }
 
         return builder.toString()
