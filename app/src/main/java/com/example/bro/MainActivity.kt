@@ -154,6 +154,12 @@ fun BroApp() {
         "📱 Inspect current screen"
     )
 
+    var showFeedbackDialog by remember { mutableStateOf(false) }
+    var feedbackGoal by remember { mutableStateOf("") }
+    var feedbackActions by remember { mutableStateOf<List<com.example.bro.model.Action>>(emptyList()) }
+    var feedbackScreen by remember { mutableStateOf<ScreenState?>(null) }
+    var isTrainingActive by remember { mutableStateOf(false) }
+
     fun startTask(commandText: String) {
         if (commandText.isBlank()) return
 
@@ -189,7 +195,13 @@ fun BroApp() {
                     context = context,
                     goalStr = resolvedGoal,
                     userOriginalPrompt = commandText,
-                    messages = messages
+                    messages = messages,
+                    onComplete = { goal, screen, actions ->
+                        feedbackGoal = goal
+                        feedbackScreen = screen
+                        feedbackActions = actions
+                        showFeedbackDialog = true
+                    }
                 )
             } catch (e: CancellationException) {
                 Log.d("BRO_MAIN", "Goal cancelled by user")
@@ -509,6 +521,90 @@ fun BroApp() {
                     color = JarvisCyan,
                     trackColor = Color(0x3300E5FF)
                 )
+            }
+
+            // 🎓 INTERACTIVE TASK FEEDBACK & DEMO TRAINING CARD
+            if (showFeedbackDialog) {
+                Surface(
+                    color = Color(0xEE0B1626),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .border(BorderStroke(1.dp, JarvisCyan), RoundedCornerShape(12.dp)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("🎯 Task Feedback & Dataset Training", color = JarvisCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text("Was the task \"$feedbackGoal\" performed correctly?", color = Color.White, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                            Button(
+                                onClick = {
+                                    com.example.bro.agent.BroTrainingManager.saveSuccessfulTrajectory(
+                                        context, feedbackGoal, feedbackScreen ?: ScreenState("", emptyList()), feedbackActions
+                                    )
+                                    showFeedbackDialog = false
+                                    Toast.makeText(context, "✅ Workflow saved to bro_training_dataset.jsonl!", Toast.LENGTH_SHORT).show()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                            ) {
+                                Text("👍 Yes (Correct)", color = Color.White, fontSize = 11.sp)
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    com.example.bro.agent.BroTrainingManager.startDemonstrationRecording(feedbackGoal, feedbackScreen)
+                                    isTrainingActive = true
+                                    showFeedbackDialog = false
+                                    Toast.makeText(context, "🎓 Demonstration Mode Active! Perform steps manually.", Toast.LENGTH_LONG).show()
+                                    val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                                        addCategory(Intent.CATEGORY_HOME)
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    context.startActivity(homeIntent)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFF59E0B))
+                            ) {
+                                Text("🎓 No, Train BRO", color = Color.Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (isTrainingActive || com.example.bro.agent.BroTrainingManager.isRecordingDemonstration) {
+                Surface(
+                    color = Color(0xEE2A1000),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .border(BorderStroke(1.5.dp, Color(0xFFF59E0B)), RoundedCornerShape(10.dp)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp).fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("🔴 Training Demo Recording...", color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text("Goal: ${com.example.bro.agent.BroTrainingManager.currentTrainingGoal}", color = Color.White, fontSize = 10.sp, maxLines = 1)
+                        }
+                        Button(
+                            onClick = {
+                                val count = com.example.bro.agent.BroTrainingManager.finishDemonstrationRecording(context)
+                                isTrainingActive = false
+                                Toast.makeText(context, "🎓 Saved $count demonstrated actions to training dataset!", Toast.LENGTH_LONG).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                        ) {
+                            Text("Finish Demo", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
 
             // Futuristic Controller Bar with Dual-State Send/Stop Button & Voice Shortcut
@@ -845,7 +941,8 @@ suspend fun executeGoalWithPlanner(
     context: Context,
     goalStr: String,
     userOriginalPrompt: String = goalStr,
-    messages: MutableList<Message>
+    messages: MutableList<Message>,
+    onComplete: ((goal: String, screen: ScreenState?, actions: List<com.example.bro.model.Action>) -> Unit)? = null
 ) {
     val normalizedGoal = goalStr.lowercase()
     val trimmedGoal = normalizedGoal.trim()
@@ -1050,6 +1147,7 @@ suspend fun executeGoalWithPlanner(
 
                     messages.add(Message(displayText, false))
                     com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, displayText)
+                    onComplete?.invoke(goalStr, screen, memory.previousActions)
                     returnToBroApp(context)
                     return
                 }

@@ -50,6 +50,24 @@ class BroAccessibilityService : AccessibilityService() {
         if (root.packageName == packageName)
             return
 
+        // Record user manual actions during Demonstration Mode
+        if (com.example.bro.agent.BroTrainingManager.isRecordingDemonstration) {
+            when (event.eventType) {
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    val text = (event.text?.firstOrNull() ?: event.contentDescription ?: "").toString().trim()
+                    if (text.isNotBlank()) {
+                        com.example.bro.agent.BroTrainingManager.recordManualAction("CLICK", text)
+                    }
+                }
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    val text = event.text?.firstOrNull()?.toString()?.trim()
+                    if (!text.isNullOrBlank()) {
+                        com.example.bro.agent.BroTrainingManager.recordManualAction("TYPE", "Input Field", text)
+                    }
+                }
+            }
+        }
+
         val screen = screenReader.read(root)
 
         Log.d(
