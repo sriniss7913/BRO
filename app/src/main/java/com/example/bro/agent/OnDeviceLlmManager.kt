@@ -5,7 +5,6 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import java.io.File
-import java.util.regex.Pattern
 
 /**
  * On-Device LLM & Pointer Network Manager.
@@ -24,7 +23,7 @@ object OnDeviceLlmManager {
     private var llmInference: LlmInference? = null
     private var currentModelName: String = ""
 
-    val isModelLoaded: Boolean get() = llmInference != null || currentModelName.isNotBlank()
+    val isModelLoaded: Boolean get() = llmInference != null || OnnxNavPredictor.isModelLoaded || currentModelName.isNotBlank()
     val loadedModelName: String get() = currentModelName
 
     fun init(context: Context) {
@@ -35,6 +34,9 @@ object OnDeviceLlmManager {
             val file = findModelFile(context, savedModel)
             if (file != null && file.exists()) {
                 currentModelName = savedModel
+                if (savedModel.lowercase().endsWith(".onnx")) {
+                    OnnxNavPredictor.loadModel(context, file)
+                }
                 Log.d(TAG, "Restored selected model on startup: $savedModel at ${file.absolutePath}")
             }
         }
@@ -118,10 +120,15 @@ object OnDeviceLlmManager {
                 Log.d(TAG, "MediaPipe Task Model loaded successfully: $modelFileName")
                 Result.success("Loaded MediaPipe Model '$modelFileName' (${modelFile.length() / 1024 / 1024}MB)")
             } else if (lowerName.endsWith(".onnx")) {
-                currentModelName = modelFileName
-                saveSelectedModel(context, modelFileName)
-                Log.d(TAG, "ONNX Navigation Model selected: $modelFileName")
-                Result.success("Selected ONNX Pointer Network '$modelFileName' (${modelFile.length() / 1024} KB)")
+                val success = OnnxNavPredictor.loadModel(context, modelFile)
+                if (success) {
+                    currentModelName = modelFileName
+                    saveSelectedModel(context, modelFileName)
+                    Log.d(TAG, "ONNX Navigation Model loaded into OrtSession: $modelFileName")
+                    Result.success("Loaded ONNX Neural Network '$modelFileName' (${modelFile.length() / 1024} KB)")
+                } else {
+                    Result.failure(Exception("Failed to initialize ONNX session for $modelFileName"))
+                }
             } else {
                 currentModelName = modelFileName
                 saveSelectedModel(context, modelFileName)
@@ -141,36 +148,15 @@ object OnDeviceLlmManager {
     }
 
     fun generateResponse(systemPrompt: String, userPrompt: String): String {
-        val lowerPrompt = userPrompt.lowercase()
-
-        // 1. If we are on BRO Main Screen, launch WhatsApp
-        if (userPrompt.contains("Current App: com.example.bro") || userPrompt.contains("BRO Main Screen")) {
-            if (lowerPrompt.contains("whatsapp")) {
-                Log.d(TAG, "On-device Rule: Opening WhatsApp from BRO Main Screen")
-                return "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Opening WhatsApp\"}"
-            }
+        // 1. If ONNX model is loaded, run pure ONNX Runtime neural network forward pass!
+        if (currentModelName.lowercase().endsWith(".onnx") && OnnxNavPredictor.isModelLoaded) {
+            Log.d(TAG, "Running pure ONNX Neural Network Forward Pass for $currentModelName")
+            return OnnxNavPredictor.predict(userPrompt)
         }
 
-        // 2. If System UI dialog is covering screen
-        if (userPrompt.contains("Current App: com.android.systemui")) {
-            val doneMatcher = Pattern.compile("\\[(\\d+)\\]\\s*(Done|Close|Dismiss|Cancel)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
-            if (doneMatcher.find()) {
-                val doneId = doneMatcher.group(1) ?: "1"
-                Log.d(TAG, "On-device Rule: Dismissing System UI overlay via id [$doneId]")
-                return "{\"type\":\"CLICK\",\"targetId\":$doneId,\"reply\":\"Dismissing system overlay\"}"
-            }
-            Log.d(TAG, "On-device Rule: System UI active, re-launching WhatsApp")
-            return "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Re-opening WhatsApp\"}"
-        }
-
-        // 3. If ONNX model is selected
-        if (currentModelName.lowercase().endsWith(".onnx")) {
-            return predictOnnxAction(userPrompt)
-        }
-
-        // 4. Fallback to MediaPipe LlmInference
+        // 2. Fallback to MediaPipe LlmInference
         val inference = llmInference
-            ?: throw Exception("No on-device MediaPipe model loaded. Load a model in Settings → 📱 On-Device")
+            ?: throw Exception("No on-device MediaPipe or ONNX model loaded. Load a model in Settings → 📱 On-Device")
 
         val combinedPrompt = buildString {
             append("<start_of_turn>user\n")
@@ -190,96 +176,10 @@ object OnDeviceLlmManager {
         return result.trim()
     }
 
-    /**
-     * Rule-guided Pointer Network matching for ONNX navigation.
-     */
-    private fun predictOnnxAction(userPrompt: String): String {
-        val lowerPrompt = userPrompt.lowercase()
-
-        // Only exit if actually inside Fullscreen Camera Mode (not WhatsApp main screen top bar icon)
-        if (lowerPrompt.contains("switch to front camera") || lowerPrompt.contains("flash off") || userPrompt.contains("com.sec.android.app.camera")) {
-            Log.d(TAG, "ONNX Pointer: Fullscreen Camera active, issuing BACK action to return to chat")
-            return "{\"type\":\"BACK\",\"reply\":\"Exiting camera\"}"
-        }
-
-        // Extract goal target contact name (e.g. "Ramesh")
-        var targetName = "Ramesh"
-        val goalMatcher = Pattern.compile("goal:\\s*([^\\n]+)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
-        if (goalMatcher.find()) {
-            val goalText = goalMatcher.group(1) ?: ""
-            if (goalText.contains(" to ")) {
-                targetName = goalText.split(" to ")[1].split(" ")[0].trim()
-            }
-        }
-
-        // Parse screen elements
-        val elementMatcher = Pattern.compile("\\[(\\d+)\\]\\s*([^\\n\\[]+)(?:\\[(CLICK|CHK|EDT)\\])?").matcher(userPrompt)
-        val elements = mutableListOf<Triple<Int, String, String>>()
-        while (elementMatcher.find()) {
-            val id = elementMatcher.group(1)?.toIntOrNull() ?: continue
-            val text = elementMatcher.group(2)?.trim() ?: ""
-            val tags = elementMatcher.group(3) ?: ""
-
-            val lowerText = text.lowercase()
-            // Ignore camera/status bar top icons from target selection
-            if (lowerText == "camera" || lowerText.contains("status_bar") || lowerText.contains("frame")) {
-                continue
-            }
-
-            elements.add(Triple(id, text, tags))
-        }
-
-        // 1. If inside Chat screen with target contact or typing area:
-        val inputArea = elements.firstOrNull { (_, text, _) ->
-            text.contains("Type a message", ignoreCase = true) || text.contains("Message", ignoreCase = true)
-        }
-        val sendBtn = elements.firstOrNull { (_, text, _) ->
-            text.contains("Send", ignoreCase = true) || text.contains("Voice message", ignoreCase = true)
-        }
-        if (inputArea != null) {
-            Log.d(TAG, "ONNX Pointer: Found chat input area id [${inputArea.first}]")
-            return "{\"type\":\"TYPE\",\"targetId\":${inputArea.first},\"text\":\"hi\",\"reply\":\"Typing message\"}"
-        }
-
-        // 2. Match target contact name in list (e.g. Ramesh)
-        val contactMatch = elements.firstOrNull { (_, text, _) ->
-            text.contains(targetName, ignoreCase = true) && !text.contains("Media", ignoreCase = true)
-        }
-        if (contactMatch != null) {
-            Log.d(TAG, "ONNX Pointer: Matched contact '${contactMatch.second}' id [${contactMatch.first}]")
-            return "{\"type\":\"CLICK\",\"targetId\":${contactMatch.first},\"reply\":\"Clicking ${contactMatch.second}\"}"
-        }
-
-        // 3. Match Search icon or Search bar
-        val searchMatch = elements.firstOrNull { (_, text, _) ->
-            text.contains("Search", ignoreCase = true) || text.contains("Ask Meta AI", ignoreCase = true)
-        }
-        if (searchMatch != null) {
-            Log.d(TAG, "ONNX Pointer: Matched Search id [${searchMatch.first}]")
-            return "{\"type\":\"CLICK\",\"targetId\":${searchMatch.first},\"reply\":\"Clicking Search\"}"
-        }
-
-        // 4. Match New Chat button (e.g. Start chat / FAB)
-        val newChatMatch = elements.firstOrNull { (_, text, _) ->
-            text.contains("New chat", ignoreCase = true) || text.contains("Start chat", ignoreCase = true)
-        }
-        if (newChatMatch != null) {
-            Log.d(TAG, "ONNX Pointer: Matched New Chat id [${newChatMatch.first}]")
-            return "{\"type\":\"CLICK\",\"targetId\":${newChatMatch.first},\"reply\":\"Clicking New Chat\"}"
-        }
-
-        // Fallback: Click first valid candidate chat item
-        val firstValid = elements.firstOrNull { (_, text, _) -> text.length > 2 }
-        if (firstValid != null) {
-            return "{\"type\":\"CLICK\",\"targetId\":${firstValid.first},\"reply\":\"Clicking ${firstValid.second}\"}"
-        }
-
-        return "{\"type\":\"FINISH\",\"reply\":\"Task completed\"}"
-    }
-
     fun close() {
         try {
             llmInference?.close()
+            OnnxNavPredictor.close()
         } catch (e: Exception) {
             Log.w(TAG, "Error closing model: ${e.message}")
         }
