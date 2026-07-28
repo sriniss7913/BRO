@@ -143,7 +143,7 @@ object OnDeviceLlmManager {
     fun generateResponse(systemPrompt: String, userPrompt: String): String {
         val lowerPrompt = userPrompt.lowercase()
 
-        // 1. If we are on BRO Main Screen, first action must be OPEN_APP
+        // 1. If we are on BRO Main Screen, launch WhatsApp
         if (userPrompt.contains("Current App: com.example.bro") || userPrompt.contains("BRO Main Screen")) {
             if (lowerPrompt.contains("whatsapp")) {
                 Log.d(TAG, "On-device Rule: Opening WhatsApp from BRO Main Screen")
@@ -196,9 +196,9 @@ object OnDeviceLlmManager {
     private fun predictOnnxAction(userPrompt: String): String {
         val lowerPrompt = userPrompt.lowercase()
 
-        // If inside Camera view (e.g. "Switch to front camera", "Flash off"), press BACK to exit camera!
-        if (lowerPrompt.contains("camera") || lowerPrompt.contains("flash off") || lowerPrompt.contains("ar effect")) {
-            Log.d(TAG, "ONNX Pointer: Inside Camera screen, issuing BACK action to return to chat")
+        // Only exit if actually inside Fullscreen Camera Mode (not WhatsApp main screen top bar icon)
+        if (lowerPrompt.contains("switch to front camera") || lowerPrompt.contains("flash off") || userPrompt.contains("com.sec.android.app.camera")) {
+            Log.d(TAG, "ONNX Pointer: Fullscreen Camera active, issuing BACK action to return to chat")
             return "{\"type\":\"BACK\",\"reply\":\"Exiting camera\"}"
         }
 
@@ -212,7 +212,7 @@ object OnDeviceLlmManager {
             }
         }
 
-        // Parse screen elements: e.g. "[15] Ramesh [CLICK]"
+        // Parse screen elements
         val elementMatcher = Pattern.compile("\\[(\\d+)\\]\\s*([^\\n\\[]+)(?:\\[(CLICK|CHK|EDT)\\])?").matcher(userPrompt)
         val elements = mutableListOf<Triple<Int, String, String>>()
         while (elementMatcher.find()) {
@@ -220,16 +220,28 @@ object OnDeviceLlmManager {
             val text = elementMatcher.group(2)?.trim() ?: ""
             val tags = elementMatcher.group(3) ?: ""
 
-            // Filter out camera / flash / status bar icons from selection candidates
             val lowerText = text.lowercase()
-            if (lowerText.contains("camera") || lowerText.contains("flash") || lowerText.contains("ar effect") || lowerText.contains("status_bar")) {
+            // Ignore camera/status bar top icons from target selection
+            if (lowerText == "camera" || lowerText.contains("status_bar") || lowerText.contains("frame")) {
                 continue
             }
 
             elements.add(Triple(id, text, tags))
         }
 
-        // Priority 1: Match target contact item in list (e.g. Ramesh)
+        // 1. If inside Chat screen with target contact or typing area:
+        val inputArea = elements.firstOrNull { (_, text, _) ->
+            text.contains("Type a message", ignoreCase = true) || text.contains("Message", ignoreCase = true)
+        }
+        val sendBtn = elements.firstOrNull { (_, text, _) ->
+            text.contains("Send", ignoreCase = true) || text.contains("Voice message", ignoreCase = true)
+        }
+        if (inputArea != null) {
+            Log.d(TAG, "ONNX Pointer: Found chat input area id [${inputArea.first}]")
+            return "{\"type\":\"TYPE\",\"targetId\":${inputArea.first},\"text\":\"hi\",\"reply\":\"Typing message\"}"
+        }
+
+        // 2. Match target contact name in list (e.g. Ramesh)
         val contactMatch = elements.firstOrNull { (_, text, _) ->
             text.contains(targetName, ignoreCase = true) && !text.contains("Media", ignoreCase = true)
         }
@@ -238,28 +250,28 @@ object OnDeviceLlmManager {
             return "{\"type\":\"CLICK\",\"targetId\":${contactMatch.first},\"reply\":\"Clicking ${contactMatch.second}\"}"
         }
 
-        // Priority 2: Match Search button
+        // 3. Match Search icon or Search bar
         val searchMatch = elements.firstOrNull { (_, text, _) ->
-            text.contains("Search", ignoreCase = true)
+            text.contains("Search", ignoreCase = true) || text.contains("Ask Meta AI", ignoreCase = true)
         }
         if (searchMatch != null) {
             Log.d(TAG, "ONNX Pointer: Matched Search id [${searchMatch.first}]")
             return "{\"type\":\"CLICK\",\"targetId\":${searchMatch.first},\"reply\":\"Clicking Search\"}"
         }
 
-        // Priority 3: Match Send button / Chat Input
-        val sendMatch = elements.firstOrNull { (_, text, _) ->
-            text.contains("Send", ignoreCase = true) || text.contains("Type a message", ignoreCase = true)
+        // 4. Match New Chat button (e.g. Start chat / FAB)
+        val newChatMatch = elements.firstOrNull { (_, text, _) ->
+            text.contains("New chat", ignoreCase = true) || text.contains("Start chat", ignoreCase = true)
         }
-        if (sendMatch != null) {
-            Log.d(TAG, "ONNX Pointer: Matched Send/Input id [${sendMatch.first}]")
-            return "{\"type\":\"TYPE\",\"targetId\":${sendMatch.first},\"text\":\"hi\",\"reply\":\"Typing message\"}"
+        if (newChatMatch != null) {
+            Log.d(TAG, "ONNX Pointer: Matched New Chat id [${newChatMatch.first}]")
+            return "{\"type\":\"CLICK\",\"targetId\":${newChatMatch.first},\"reply\":\"Clicking New Chat\"}"
         }
 
-        // Fallback: Click first valid candidate item or finish
-        val firstClickable = elements.firstOrNull()
-        if (firstClickable != null) {
-            return "{\"type\":\"CLICK\",\"targetId\":${firstClickable.first},\"reply\":\"Clicking ${firstClickable.second}\"}"
+        // Fallback: Click first valid candidate chat item
+        val firstValid = elements.firstOrNull { (_, text, _) -> text.length > 2 }
+        if (firstValid != null) {
+            return "{\"type\":\"CLICK\",\"targetId\":${firstValid.first},\"reply\":\"Clicking ${firstValid.second}\"}"
         }
 
         return "{\"type\":\"FINISH\",\"reply\":\"Task completed\"}"
