@@ -133,10 +133,14 @@ fun BroApp() {
     var localModelName by remember {
         mutableStateOf(prefs.getString("local_model_name", "local-model") ?: "local-model")
     }
+    var customModelDirPath by remember {
+        mutableStateOf(prefs.getString("on_device_model_dir", "/sdcard/Download/") ?: "/sdcard/Download/")
+    }
 
     com.example.bro.network.GroqRepository.providerMode = providerMode
     com.example.bro.network.GroqRepository.localPcUrl = localPcUrl
     com.example.bro.network.GroqRepository.localModelName = localModelName
+    com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = customModelDirPath
 
     // Pulsing Animation for BRO Core Orb
     val infiniteTransition = rememberInfiniteTransition(label = "broGlow")
@@ -871,11 +875,23 @@ fun BroApp() {
                                 var selectedModelFile by remember { mutableStateOf("") }
 
                                 Text("📱 On-Device Model (Zero Network)", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
-                                Text(
-                                    "Place .task model file at:\n${com.example.bro.agent.OnDeviceLlmManager.getModelsDir(context).absolutePath}/",
-                                    fontSize = 9.sp,
-                                    color = JarvisTextSecondary,
-                                    fontFamily = FontFamily.Monospace
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text("Model Folder Path:", fontSize = 11.sp, color = JarvisTextPrimary)
+                                OutlinedTextField(
+                                    value = customModelDirPath,
+                                    onValueChange = {
+                                        customModelDirPath = it
+                                        com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = it
+                                        prefs.edit().putString("on_device_model_dir", it).apply()
+                                    },
+                                    placeholder = { Text("/sdcard/Download/", color = JarvisTextSecondary) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = JarvisCyan,
+                                        unfocusedBorderColor = Color(0x4400E5FF),
+                                        focusedTextColor = JarvisTextPrimary,
+                                        unfocusedTextColor = JarvisTextPrimary
+                                    )
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
 
