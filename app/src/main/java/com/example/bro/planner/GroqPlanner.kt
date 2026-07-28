@@ -28,10 +28,11 @@ class GroqPlanner(
     ): PlannerResponse {
         val systemPrompt = if (context != null) SystemPromptManager.getSystemPrompt(context) else SystemPromptManager.DEFAULT_SYSTEM_PROMPT
 
+        val memoryContext = if (context != null) com.example.bro.agent.UserConversationMemory.buildMemoryPromptContext(context) else ""
         val screenPrompt = buildScreenPrompt(screen, memory)
 
         val userPrompt = """
-GOAL: ${goal.request}
+${if (memoryContext.isNotBlank()) memoryContext else ""}GOAL: ${goal.request}
 
 $screenPrompt
 

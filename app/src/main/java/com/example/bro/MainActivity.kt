@@ -167,13 +167,28 @@ fun BroApp() {
 
         messages.add(Message(commandText, true))
 
+        // Fact Registration Check (e.g. "my name is srini")
+        val factReply = com.example.bro.agent.UserConversationMemory.processFactRegistration(context, commandText)
+        if (factReply != null) {
+            messages.add(Message(factReply, false))
+            com.example.bro.agent.UserConversationMemory.addTurn(context, commandText, commandText, factReply)
+            return
+        }
+
+        // Contextual Goal Resolution (e.g. "what about pasu" -> "check recent message for pasu")
+        val resolvedGoal = com.example.bro.agent.UserConversationMemory.resolveGoalWithContext(context, commandText)
+        if (resolvedGoal.lowercase() != commandText.lowercase()) {
+            messages.add(Message("💡 Context linked: Target task → \"$resolvedGoal\"", false))
+        }
+
         agentJob?.cancel()
         agentJob = scope.launch {
             isRunningTask = true
             try {
                 executeGoalWithPlanner(
                     context = context,
-                    goalStr = commandText,
+                    goalStr = resolvedGoal,
+                    userOriginalPrompt = commandText,
                     messages = messages
                 )
             } catch (e: CancellationException) {
@@ -817,7 +832,6 @@ private fun actionSignature(action: com.example.bro.model.Action): String = buil
     append(action.type)
     action.targetId?.let { append(":id=$it") }
     action.text?.let { append(":text=$it") }
-    action.packageName?.let { append(":pkg=$it") }
 }
 
 private fun screenSignature(screen: ScreenState): String {
@@ -830,30 +844,35 @@ private fun screenSignature(screen: ScreenState): String {
 suspend fun executeGoalWithPlanner(
     context: Context,
     goalStr: String,
+    userOriginalPrompt: String = goalStr,
     messages: MutableList<Message>
 ) {
     val normalizedGoal = goalStr.lowercase()
     val trimmedGoal = normalizedGoal.trim()
 
     // Fast-path conversational greetings & Q&A (0 tokens to LLM, prevents opening apps on 'hi')
+    val userName = com.example.bro.agent.UserConversationMemory.getFacts(context)["userName"]
+    val nameGreeting = if (!userName.isNullOrBlank()) " $userName" else ""
+
     val conversationalResponse = when (trimmedGoal) {
         "hi", "hello", "hey", "hi bro", "hello bro", "hey bro", "bro", "hlo", "hola" ->
-            "⚡ Hey! I'm B.R.O., your autonomous phone assistant. What task can I do for you?"
+            "⚡ Hey$nameGreeting! I'm B.R.O., your autonomous phone assistant. What task can I do for you?"
         "how are you", "how are you doing", "how r u" ->
-            "⚡ All systems operational! Ready to automate your phone."
+            "⚡ All systems operational$nameGreeting! Ready to automate your phone."
         "who are you", "what are you", "what is bro" ->
             "⚡ I'm B.R.O. (Personal AI Assistant). Tell me what you want done and I'll operate your phone for you!"
         "what can you do", "help", "commands" ->
             "⚡ Here are some things I can do:\n• 'Send hi to Ramesh on WhatsApp'\n• 'Check my recent WhatsApp messages'\n• 'Open YouTube'\n• 'Open Chrome / Settings'"
         "thanks", "thank you", "thx", "ty" ->
-            "⚡ Happy to help! Let me know if you need anything else."
+            "⚡ Happy to help$nameGreeting! Let me know if you need anything else."
         "bye", "goodbye" ->
-            "⚡ Goodbye!"
+            "⚡ Goodbye$nameGreeting!"
         else -> null
     }
 
     if (conversationalResponse != null) {
         messages.add(Message(conversationalResponse, false))
+        com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, conversationalResponse)
         return
     }
 
@@ -983,11 +1002,18 @@ suspend fun executeGoalWithPlanner(
 
             when (act.type) {
                 ActionType.CHAT -> {
-                    if (screen.packageName != context.packageName) {
-                        delay(1000)
-                    } else {
+                    val chatText = act.summary.orEmpty().ifBlank { thought }
+                    if (screen.packageName == context.packageName && chatText.isNotBlank()) {
+                        messages.add(Message("💬 $chatText", false))
+                        com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
+                        return
+                    } else if (chatText.isNotBlank()) {
+                        messages.add(Message("❓ $chatText", false))
+                        com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
+                        returnToBroApp(context)
                         return
                     }
+                    delay(1000)
                 }
 
                 ActionType.FINISH -> {
@@ -1023,6 +1049,7 @@ suspend fun executeGoalWithPlanner(
                     }
 
                     messages.add(Message(displayText, false))
+                    com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, displayText)
                     returnToBroApp(context)
                     return
                 }
