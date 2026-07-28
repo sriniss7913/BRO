@@ -579,6 +579,61 @@ fun BroApp() {
                 }
             }
 
+            var showFinishDemoNotesDialog by remember { mutableStateOf(false) }
+            var demoNotesInput by remember { mutableStateOf("") }
+
+            if (showFinishDemoNotesDialog) {
+                AlertDialog(
+                    onDismissRequest = { showFinishDemoNotesDialog = false },
+                    title = { Text("🎓 Demo Result / Notes (Optional)", color = JarvisCyan, fontWeight = FontWeight.Bold) },
+                    text = {
+                        Column {
+                            Text("Type the expected result or answer for this task (e.g., 'Last message was: See you tomorrow'):", fontSize = 12.sp, color = Color.White)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = demoNotesInput,
+                                onValueChange = { demoNotesInput = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                placeholder = { Text("Type result notes here...", fontSize = 12.sp, color = JarvisTextSecondary) },
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = JarvisCyan,
+                                    unfocusedBorderColor = Color(0x4400E5FF),
+                                    focusedTextColor = Color.White,
+                                    unfocusedTextColor = Color.White
+                                )
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                val count = com.example.bro.agent.BroTrainingManager.finishDemonstrationRecording(context, demoNotesInput.trim())
+                                isTrainingActive = false
+                                showFinishDemoNotesDialog = false
+                                demoNotesInput = ""
+                                Toast.makeText(context, "🎓 Saved $count demonstrated actions + result notes to dataset!", Toast.LENGTH_LONG).show()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
+                        ) {
+                            Text("Save Demo", color = Color.White, fontWeight = FontWeight.Bold)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = {
+                                val count = com.example.bro.agent.BroTrainingManager.finishDemonstrationRecording(context, "")
+                                isTrainingActive = false
+                                showFinishDemoNotesDialog = false
+                                demoNotesInput = ""
+                                Toast.makeText(context, "🎓 Saved $count demonstrated actions to dataset!", Toast.LENGTH_LONG).show()
+                            }
+                        ) {
+                            Text("Skip Notes", color = JarvisRed)
+                        }
+                    }
+                )
+            }
+
             if (isTrainingActive || com.example.bro.agent.BroTrainingManager.isRecordingDemonstration) {
                 Surface(
                     color = Color(0xEE2A1000),
@@ -599,9 +654,7 @@ fun BroApp() {
                         }
                         Button(
                             onClick = {
-                                val count = com.example.bro.agent.BroTrainingManager.finishDemonstrationRecording(context)
-                                isTrainingActive = false
-                                Toast.makeText(context, "🎓 Saved $count demonstrated actions to training dataset!", Toast.LENGTH_LONG).show()
+                                showFinishDemoNotesDialog = true
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981))
                         ) {

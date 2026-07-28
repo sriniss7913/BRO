@@ -52,17 +52,24 @@ class BroAccessibilityService : AccessibilityService() {
 
         // Record user manual actions during Demonstration Mode
         if (com.example.bro.agent.BroTrainingManager.isRecordingDemonstration) {
-            when (event.eventType) {
-                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                    val text = (event.text?.firstOrNull() ?: event.contentDescription ?: "").toString().trim()
-                    if (text.isNotBlank()) {
-                        com.example.bro.agent.BroTrainingManager.recordManualAction("CLICK", text)
+            val node = event.source
+            val nodeText = (
+                node?.text?.toString() ?:
+                node?.contentDescription?.toString() ?:
+                event.text?.joinToString(" ") ?:
+                event.contentDescription?.toString() ?: ""
+            ).trim()
+
+            if (nodeText.isNotBlank()) {
+                when (event.eventType) {
+                    AccessibilityEvent.TYPE_VIEW_CLICKED,
+                    AccessibilityEvent.TYPE_VIEW_SELECTED,
+                    AccessibilityEvent.TYPE_VIEW_FOCUSED,
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                        com.example.bro.agent.BroTrainingManager.recordManualAction("CLICK", nodeText)
                     }
-                }
-                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
-                    val text = event.text?.firstOrNull()?.toString()?.trim()
-                    if (!text.isNullOrBlank()) {
-                        com.example.bro.agent.BroTrainingManager.recordManualAction("TYPE", "Input Field", text)
+                    AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                        com.example.bro.agent.BroTrainingManager.recordManualAction("TYPE", "Input Field", nodeText)
                     }
                 }
             }

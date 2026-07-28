@@ -14,6 +14,7 @@ data class TrainingSample(
     val initialScreenPackage: String,
     val screenElements: List<String>,
     val actionsPerformed: List<ActionSummary>,
+    val userDemonstrationNotes: String? = null,
     val isUserDemonstration: Boolean,
     val status: String = "SUCCESS"
 )
@@ -36,6 +37,7 @@ object BroTrainingManager {
         private set
     private val recordedDemonstrationActions = mutableListOf<ActionSummary>()
     private var initialTrainingScreen: ScreenState? = null
+    private var lastRecordedText: String = ""
 
     private fun getDatasetFile(context: Context): File {
         val dir = File(context.getExternalFilesDir(null), "logs")
@@ -43,9 +45,6 @@ object BroTrainingManager {
         return File(dir, TRAINING_FILE_NAME)
     }
 
-    /**
-     * Saves a successful automated execution trajectory to dataset.
-     */
     fun saveSuccessfulTrajectory(
         context: Context,
         goal: String,
@@ -74,36 +73,33 @@ object BroTrainingManager {
         appendSampleToFile(context, sample)
     }
 
-    /**
-     * Starts human training demonstration mode.
-     */
     fun startDemonstrationRecording(goal: String, currentScreen: ScreenState?) {
         isRecordingDemonstration = true
         currentTrainingGoal = goal
         initialTrainingScreen = currentScreen
         recordedDemonstrationActions.clear()
+        lastRecordedText = ""
         Log.d("BRO_TRAINING", "Started demonstration recording for goal: '$goal'")
     }
 
-    /**
-     * Records a manual user interaction during demonstration mode.
-     */
     fun recordManualAction(actionType: String, targetText: String?, inputContent: String? = null) {
         if (!isRecordingDemonstration) return
+
+        val cleanText = targetText?.trim() ?: ""
+        if (cleanText.isEmpty() || cleanText == lastRecordedText) return
+        lastRecordedText = cleanText
+
         val summary = ActionSummary(
             type = actionType,
-            targetText = targetText,
+            targetText = cleanText.take(50),
             textInput = inputContent,
-            summary = "User demonstrated: $actionType '$targetText'"
+            summary = "User demonstrated: $actionType '$cleanText'"
         )
         recordedDemonstrationActions.add(summary)
         Log.d("BRO_TRAINING", "Recorded demonstration action: $summary")
     }
 
-    /**
-     * Finishes training demonstration mode and appends sample to dataset.
-     */
-    fun finishDemonstrationRecording(context: Context): Int {
+    fun finishDemonstrationRecording(context: Context, userNotes: String = ""): Int {
         if (!isRecordingDemonstration) return 0
         isRecordingDemonstration = false
 
@@ -115,6 +111,7 @@ object BroTrainingManager {
                 "[${node.id}] ${(node.text ?: node.contentDescription ?: node.className ?: "").toString().take(40)}"
             } ?: emptyList(),
             actionsPerformed = ArrayList(recordedDemonstrationActions),
+            userDemonstrationNotes = userNotes.ifBlank { null },
             isUserDemonstration = true,
             status = "HUMAN_DEMONSTRATION"
         )
