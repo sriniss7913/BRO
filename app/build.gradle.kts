@@ -70,6 +70,7 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
 
-    // On-Device LLM Inference (MediaPipe)
+    // On-Device LLM Inference (MediaPipe & ONNX)
     implementation("com.google.mediapipe:tasks-genai:0.10.27")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.18.0")
 }

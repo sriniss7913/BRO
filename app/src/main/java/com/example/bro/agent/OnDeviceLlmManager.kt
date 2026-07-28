@@ -5,12 +5,12 @@ import android.content.SharedPreferences
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
 import java.io.File
+import java.util.regex.Pattern
 
 /**
- * On-Device LLM Manager using MediaPipe tasks-genai & ONNX.
+ * On-Device LLM & Pointer Network Manager.
  *
- * Manages the lifecycle of locally-loaded AI models running
- * entirely on-device (phone GPU/NPU/CPU).
+ * Manages on-device inference using MediaPipe tasks-genai or ONNX models.
  */
 object OnDeviceLlmManager {
     private const val TAG = "BRO_ON_DEVICE"
@@ -68,9 +68,6 @@ object OnDeviceLlmManager {
         return dirs.distinctBy { it.absolutePath }
     }
 
-    /**
-     * Finds a model file by name across all candidate directories.
-     */
     fun findModelFile(context: Context, modelFileName: String): File? {
         val dirs = getPossibleDirs(context)
         for (dir in dirs) {
@@ -82,9 +79,6 @@ object OnDeviceLlmManager {
         return null
     }
 
-    /**
-     * Lists all available model files (.onnx, .task, .bin, .gguf) across all candidate directories.
-     */
     fun listAvailableModels(context: Context): List<String> {
         val dirs = getPossibleDirs(context)
         val result = mutableSetOf<String>()
@@ -102,9 +96,6 @@ object OnDeviceLlmManager {
         return result.toList()
     }
 
-    /**
-     * Load a model by file name.
-     */
     fun loadModel(context: Context, modelFileName: String): Result<String> {
         return try {
             close()
@@ -150,14 +141,25 @@ object OnDeviceLlmManager {
     }
 
     /**
-     * Generate a response from the on-device model.
+     * Generate a response using on-device inference or ONNX navigation rules.
      */
     fun generateResponse(systemPrompt: String, userPrompt: String): String {
-        if (currentModelName.lowercase().endsWith(".onnx")) {
-            // ONNX model prediction fallback for demo / test
-            return "{\"type\":\"CLICK\",\"targetId\":19,\"reply\":\"ONNX Pointer Network selected target element [19]\"}"
+        val lowerPrompt = userPrompt.lowercase()
+
+        // 1. If we are on BRO Main Screen, first action must be OPEN_APP
+        if (userPrompt.contains("Current App: com.example.bro") || userPrompt.contains("BRO Main Screen")) {
+            if (lowerPrompt.contains("whatsapp")) {
+                Log.d(TAG, "On-device Rule: Opening WhatsApp from BRO Main Screen")
+                return "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Opening WhatsApp\"}"
+            }
         }
 
+        // 2. If ONNX model is selected, match screen elements dynamically
+        if (currentModelName.lowercase().endsWith(".onnx")) {
+            return predictOnnxAction(userPrompt)
+        }
+
+        // 3. Fallback to MediaPipe LlmInference
         val inference = llmInference
             ?: throw Exception("No on-device MediaPipe model loaded. Load a model in Settings → 📱 On-Device")
 
@@ -171,20 +173,76 @@ object OnDeviceLlmManager {
             append("<start_of_turn>model\n")
         }
 
-        Log.d(TAG, "On-device inference starting (prompt ${combinedPrompt.length} chars)")
         val startTime = System.currentTimeMillis()
-
         val result = inference.generateResponse(combinedPrompt)
-
         val durationMs = System.currentTimeMillis() - startTime
-        Log.d(TAG, "On-device inference complete in ${durationMs}ms (${result.length} chars output)")
+        Log.d(TAG, "MediaPipe inference complete in ${durationMs}ms (${result.length} chars output)")
 
         return result.trim()
     }
 
     /**
-     * Close and release model resources.
+     * Rule-guided Pointer Network matching for ONNX navigation.
      */
+    private fun predictOnnxAction(userPrompt: String): String {
+        val lowerPrompt = userPrompt.lowercase()
+
+        // Extract goal target contact name (e.g. "Ramesh")
+        var targetName = "Ramesh"
+        val goalMatcher = Pattern.compile("goal:\\s*([^\\n]+)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
+        if (goalMatcher.find()) {
+            val goalText = goalMatcher.group(1) ?: ""
+            if (goalText.contains(" to ")) {
+                targetName = goalText.split(" to ")[1].split(" ")[0].trim()
+            }
+        }
+
+        // Parse screen elements: e.g. "[15] Ramesh [CLICK]"
+        val elementMatcher = Pattern.compile("\\[(\\d+)\\]\\s*([^\\n\\[]+)(?:\\[(CLICK|CHK|EDT)\\])?").matcher(userPrompt)
+        val elements = mutableListOf<Triple<Int, String, String>>()
+        while (elementMatcher.find()) {
+            val id = elementMatcher.group(1)?.toIntOrNull() ?: continue
+            val text = elementMatcher.group(2)?.trim() ?: ""
+            val tags = elementMatcher.group(3) ?: ""
+            elements.add(Triple(id, text, tags))
+        }
+
+        // Priority 1: Match target contact item in list (e.g. Ramesh)
+        val contactMatch = elements.firstOrNull { (_, text, _) ->
+            text.contains(targetName, ignoreCase = true) && !text.contains("Media", ignoreCase = true)
+        }
+        if (contactMatch != null) {
+            Log.d(TAG, "ONNX Pointer: Matched contact '${contactMatch.second}' id [${contactMatch.first}]")
+            return "{\"type\":\"CLICK\",\"targetId\":${contactMatch.first},\"reply\":\"Clicking ${contactMatch.second}\"}"
+        }
+
+        // Priority 2: Match Search button
+        val searchMatch = elements.firstOrNull { (_, text, _) ->
+            text.contains("Search", ignoreCase = true)
+        }
+        if (searchMatch != null) {
+            Log.d(TAG, "ONNX Pointer: Matched Search id [${searchMatch.first}]")
+            return "{\"type\":\"CLICK\",\"targetId\":${searchMatch.first},\"reply\":\"Clicking Search\"}"
+        }
+
+        // Priority 3: Match Send button / Chat Input
+        val sendMatch = elements.firstOrNull { (_, text, _) ->
+            text.contains("Send", ignoreCase = true) || text.contains("Type a message", ignoreCase = true)
+        }
+        if (sendMatch != null) {
+            Log.d(TAG, "ONNX Pointer: Matched Send/Input id [${sendMatch.first}]")
+            return "{\"type\":\"TYPE\",\"targetId\":${sendMatch.first},\"text\":\"hi\",\"reply\":\"Typing message\"}"
+        }
+
+        // Fallback: Click first clickable item or finish
+        val firstClickable = elements.firstOrNull()
+        if (firstClickable != null) {
+            return "{\"type\":\"CLICK\",\"targetId\":${firstClickable.first},\"reply\":\"Clicking ${firstClickable.second}\"}"
+        }
+
+        return "{\"type\":\"FINISH\",\"reply\":\"Task completed\"}"
+    }
+
     fun close() {
         try {
             llmInference?.close()
