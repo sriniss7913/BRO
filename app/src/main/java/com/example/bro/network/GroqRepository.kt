@@ -57,7 +57,17 @@ class GroqRepository(
 
         // LOCAL PC MODEL SERVER BRANCH
         if (providerMode == "LOCAL_PC") {
-            val customApi = RetrofitClient.createCustomApi(localPcUrl)
+            var baseUrl = localPcUrl.trim()
+            if (baseUrl.endsWith("/v1/")) {
+                baseUrl = baseUrl.substringBeforeLast("v1/")
+            } else if (baseUrl.endsWith("/v1")) {
+                baseUrl = baseUrl.substringBeforeLast("v1")
+            }
+            if (!baseUrl.endsWith("/")) {
+                baseUrl += "/"
+            }
+
+            val customApi = RetrofitClient.createCustomApi(baseUrl)
             val request = GroqRequest(
                 model = localModelName.ifBlank { "local-model" },
                 messages = listOf(
@@ -65,7 +75,7 @@ class GroqRepository(
                     Message(role = "user", content = userPrompt)
                 )
             )
-            Log.d("BRO_GROQ", "Sending prompt to Local PC Model at $localPcUrl (model=$localModelName)")
+            Log.d("BRO_GROQ", "Sending prompt to Local PC Model at ${baseUrl}v1/chat/completions (model=$localModelName)")
             try {
                 val response = customApi.chat(authorization = "Bearer local-key", request = request)
                 if (response.isSuccessful) {
