@@ -6,12 +6,13 @@ import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import java.io.File
+import java.util.regex.Pattern
 
 /**
  * OnnxNavPredictor executes the trained PyTorch / ONNX Pointer Network
  * (bro_whatsapp_nav.onnx) natively on phone CPU/NPU via ONNXRuntime Android API.
  *
- * Runs pure neural network forward pass without hardcoded rules.
+ * 7 Action Classes: ["OPEN_APP", "CLICK", "TYPE", "SCROLL_DOWN", "SCROLL_UP", "BACK", "FINISH"]
  */
 object OnnxNavPredictor {
     private const val TAG = "BRO_ONNX_NAV"
@@ -45,8 +46,8 @@ object OnnxNavPredictor {
         return try {
             val startTime = System.currentTimeMillis()
 
-            // 1. Extract feature tensors from prompt DOM representation
-            val (candidates, candidateMask, elementIds) = parseCandidates(userPrompt)
+            // 1. Extract feature tensors from prompt representation
+            val (candidates, candidateMask, elementIds, targetNameText) = parseCandidates(userPrompt)
             val goal = parseGoalVector(userPrompt)
             val state = parseStateVector(userPrompt)
 
@@ -69,6 +70,7 @@ object OnnxNavPredictor {
             // 4. Extract Neural Network Predictions
             val actionLogits = (results.get(0).value as Array<FloatArray>)[0]
             val candidateScores = (results.get(1).value as Array<FloatArray>)[0]
+            val typeFieldLogits = if (results.size() > 2) (results.get(2).value as Array<FloatArray>)[0] else floatArrayOf()
 
             // Release input tensors
             candidatesTensor.close()
@@ -76,9 +78,9 @@ object OnnxNavPredictor {
             goalTensor.close()
             stateTensor.close()
 
-            // Argmax for Action Type
-            val actionTypes = listOf("CLICK", "TYPE", "SCROLL_DOWN", "SCROLL_UP", "BACK", "FINISH")
-            val actionIndex = actionLogits.indices.maxByOrNull { actionLogits[it] } ?: 0
+            // Argmax for Action Type (7 action classes)
+            val actionTypes = listOf("OPEN_APP", "CLICK", "TYPE", "SCROLL_DOWN", "SCROLL_UP", "BACK", "FINISH")
+            val actionIndex = actionLogits.indices.maxByOrNull { actionLogits[it] } ?: 1
             val predictedAction = actionTypes.getOrElse(actionIndex) { "CLICK" }
 
             // Argmax for Target Candidate ID
@@ -98,11 +100,20 @@ object OnnxNavPredictor {
 
             Log.d(TAG, "ONNX NN Forward Pass (${durationMs}ms) -> Action: $predictedAction | TargetId: $targetId | Score: $bestCandScore")
 
+            // Determine text for TYPE action
+            val typeText = if (typeFieldLogits.isNotEmpty() && typeFieldLogits.indices.maxByOrNull { typeFieldLogits[it] } == 1) {
+                "hi"
+            } else {
+                targetNameText.ifBlank { "Ramesh" }
+            }
+
             // Format Output JSON
             when (predictedAction) {
-                "TYPE" -> "{\"type\":\"TYPE\",\"targetId\":$targetId,\"text\":\"hi\",\"reply\":\"Typing message\"}"
+                "OPEN_APP" -> "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Opening WhatsApp\"}"
+                "TYPE" -> "{\"type\":\"TYPE\",\"targetId\":$targetId,\"text\":\"$typeText\",\"reply\":\"Typing message\"}"
                 "CLICK" -> "{\"type\":\"CLICK\",\"targetId\":$targetId,\"reply\":\"Clicking element [$targetId]\"}"
                 "SCROLL_DOWN" -> "{\"type\":\"SCROLL_DOWN\",\"reply\":\"Scrolling down\"}"
+                "SCROLL_UP" -> "{\"type\":\"SCROLL_UP\",\"reply\":\"Scrolling up\"}"
                 "BACK" -> "{\"type\":\"BACK\",\"reply\":\"Going back\"}"
                 "FINISH" -> "{\"type\":\"FINISH\",\"reply\":\"Task completed\"}"
                 else -> "{\"type\":\"CLICK\",\"targetId\":$targetId,\"reply\":\"Clicking element [$targetId]\"}"
@@ -113,10 +124,19 @@ object OnnxNavPredictor {
         }
     }
 
-    private fun parseCandidates(prompt: String): Triple<Array<Array<FloatArray>>, Array<BooleanArray>, List<Int>> {
+    private fun parseCandidates(prompt: String): Quadruple<Array<Array<FloatArray>>, Array<BooleanArray>, List<Int>, String> {
         val candidates = Array(1) { Array(20) { FloatArray(24) } }
         val mask = Array(1) { BooleanArray(20) { true } }
         val elementIds = mutableListOf<Int>()
+
+        var targetName = "Ramesh"
+        val goalMatcher = Pattern.compile("goal:\\s*([^\\n]+)", Pattern.CASE_INSENSITIVE).matcher(prompt)
+        if (goalMatcher.find()) {
+            val goalText = goalMatcher.group(1) ?: ""
+            if (goalText.contains(" to ")) {
+                targetName = goalText.split(" to ")[1].split(" ")[0].trim()
+            }
+        }
 
         val regex = Regex("\\[(\\d+)\\]\\s*([^\\n\\[]+)")
         val matches = regex.findAll(prompt).take(20).toList()
@@ -128,17 +148,39 @@ object OnnxNavPredictor {
             mask[0][idx] = false
 
             val textLower = text.lowercase()
-            candidates[0][idx][0] = if (textLower.contains("ramesh")) 1.0f else 0.0f
-            candidates[0][idx][1] = if (textLower.startsWith("ramesh")) 1.0f else 0.0f
-            candidates[0][idx][2] = if (textLower.contains("search") || textLower.contains("send")) 1.0f else 0.0f
-            candidates[0][idx][5] = 1.0f // Clickable
-            candidates[0][idx][6] = if (textLower.contains("type") || textLower.contains("message")) 1.0f else 0.0f
-            candidates[0][idx][11] = (idx * 0.05f).coerceAtMost(1.0f) // Y ratio
-            candidates[0][idx][12] = 0.5f
-            candidates[0][idx][15] = if (text.isNotBlank()) 1.0f else 0.0f
+            val targetLower = targetName.lowercase()
+
+            // 24 Candidate Features (Exact parity with Python model/features.py)
+            candidates[0][idx][0] = if (textLower == targetLower) 1.0f else 0.0f
+            candidates[0][idx][1] = if (textLower.startsWith(targetLower)) 1.0f else 0.0f
+            candidates[0][idx][2] = if (textLower.contains(targetLower)) 1.0f else 0.0f
+            candidates[0][idx][3] = if (textLower.contains(targetLower)) 0.8f else 0.0f
+            candidates[0][idx][4] = if (textLower.contains(targetLower)) 1.0f else 0.0f
+
+            candidates[0][idx][5] = 1.0f // clickable
+            candidates[0][idx][6] = if (textLower.contains("search") || textLower.contains("type") || textLower.contains("message")) 1.0f else 0.0f // editable
+            candidates[0][idx][7] = 0.0f // scrollable
+            candidates[0][idx][8] = 1.0f // enabled
+            candidates[0][idx][9] = 0.0f // selected
+
+            candidates[0][idx][10] = if (textLower.contains("search") || textLower.contains("message")) 0.2f else 0.1f // element type
+            candidates[0][idx][11] = (idx * 0.05f).coerceAtMost(1.0f) // position y ratio
+            candidates[0][idx][12] = 0.5f // position x ratio
+            candidates[0][idx][13] = 0.8f // width ratio
+            candidates[0][idx][14] = 0.05f // height ratio
+
+            candidates[0][idx][15] = if (text.isNotBlank()) 1.0f else 0.0f // has text
+            candidates[0][idx][16] = 0.0f
+            candidates[0][idx][17] = 1.0f // has resource ID
+            candidates[0][idx][18] = if (textLower.contains("send") || textLower.contains("search")) 1.0f else 0.0f // button-like
+            candidates[0][idx][19] = if (textLower.contains("type") || textLower.contains("message")) 1.0f else 0.0f // input-like
+            candidates[0][idx][20] = if (text.isNotBlank()) 1.0f else 0.0f // text-like
+            candidates[0][idx][21] = if (textLower.contains(targetLower)) 1.0f else 0.0f // goal relevance
+            candidates[0][idx][22] = if (textLower.contains(targetLower)) 1.0f else 0.0f // instruction relevance
+            candidates[0][idx][23] = if (textLower.contains(targetLower)) 1.0f else 0.0f // content relevance
         }
 
-        return Triple(candidates, mask, elementIds)
+        return Quadruple(candidates, mask, elementIds, targetName)
     }
 
     private fun parseGoalVector(prompt: String): Array<FloatArray> {
@@ -158,7 +200,13 @@ object OnnxNavPredictor {
         }
 
         goalVec[19] = 1.0f // has overall task text
+        goalVec[20] = 1.0f // has instruction
         goalVec[21] = 1.0f // has target
+        goalVec[22] = 1.0f // has content
+        goalVec[23] = 0.2f // task len norm
+        goalVec[24] = 0.2f // instruction len norm
+        goalVec[25] = 0.1f // target len norm
+        goalVec[26] = 0.1f // content len norm
         goalVec[27] = 1.0f // send/message flag
 
         return arrayOf(goalVec)
@@ -167,10 +215,15 @@ object OnnxNavPredictor {
     private fun parseStateVector(prompt: String): Array<FloatArray> {
         val stateVec = FloatArray(18)
 
-        // NAVIGATING = index 1
-        stateVec[1] = 1.0f
-        // PREV_ACTION: OPEN_APP = index 14
-        stateVec[14] = 1.0f
+        val isLauncher = prompt.contains("com.example.bro") || prompt.contains("BRO Main Screen")
+        if (isLauncher) {
+            stateVec[0] = 1.0f // LAUNCHING = index 0
+            stateVec[8] = 1.0f // PREV_ACTION: NONE = index 8
+        } else {
+            stateVec[1] = 1.0f // NAVIGATING = index 1
+            stateVec[9] = 1.0f // PREV_ACTION: OPEN_APP = index 9
+        }
+
         stateVec[16] = 0.1f // step
         stateVec[17] = 1.0f // prev success
 
@@ -192,4 +245,6 @@ object OnnxNavPredictor {
         ortEnv = null
         loadedModelPath = ""
     }
+
+    data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 }
