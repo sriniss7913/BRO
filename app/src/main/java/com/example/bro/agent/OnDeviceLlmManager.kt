@@ -15,7 +15,7 @@ object OnDeviceLlmManager {
     private const val TAG = "BRO_ON_DEVICE"
     private const val DEFAULT_MODELS_DIR = "models"
 
-    var customModelDirPath: String = "/sdcard/Download/"
+    var customModelDirPath: String = "/sdcard/BRO/"
 
     private var llmInference: LlmInference? = null
     private var currentModelName: String = ""
@@ -25,16 +25,31 @@ object OnDeviceLlmManager {
 
     /**
      * Returns the directory where model files should be placed.
-     * Uses customModelDirPath if set and exists, otherwise app files dir.
+     * Tries customModelDirPath, /sdcard/BRO/, /sdcard/Download/, or app files dir.
      */
     fun getModelsDir(context: Context): File {
-        val customPath = customModelDirPath.trim()
-        if (customPath.isNotBlank()) {
-            val customDir = File(customPath)
+        var rawPath = customModelDirPath.trim()
+        if (rawPath.startsWith("/storage/emulated/0/")) {
+            rawPath = rawPath.replace("/storage/emulated/0/", "/sdcard/")
+        }
+
+        if (rawPath.isNotBlank()) {
+            val customDir = File(rawPath)
             if (customDir.exists() && customDir.isDirectory) {
                 return customDir
             }
         }
+
+        val broDir = File("/sdcard/BRO")
+        if (broDir.exists() && broDir.isDirectory) {
+            return broDir
+        }
+
+        val downloadDir = File("/sdcard/Download")
+        if (downloadDir.exists() && downloadDir.isDirectory) {
+            return downloadDir
+        }
+
         val defaultDir = File(context.getExternalFilesDir(null), DEFAULT_MODELS_DIR)
         if (!defaultDir.exists()) defaultDir.mkdirs()
         return defaultDir
@@ -45,10 +60,15 @@ object OnDeviceLlmManager {
      */
     fun listAvailableModels(context: Context): List<String> {
         val dir = getModelsDir(context)
-        return dir.listFiles()
-            ?.filter { it.isFile && (it.name.endsWith(".onnx") || it.name.endsWith(".task") || it.name.endsWith(".bin") || it.name.endsWith(".gguf")) }
-            ?.map { it.name }
-            ?: emptyList()
+        val files = dir.listFiles() ?: return emptyList()
+        return files
+            .filter { it.isFile && (
+                it.name.lowercase().endsWith(".onnx") ||
+                it.name.lowercase().endsWith(".task") ||
+                it.name.lowercase().endsWith(".bin") ||
+                it.name.lowercase().endsWith(".gguf")
+            ) }
+            .map { it.name }
     }
 
     /**
@@ -68,7 +88,8 @@ object OnDeviceLlmManager {
 
             Log.d(TAG, "Loading on-device model: ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
 
-            if (modelFileName.endsWith(".task")) {
+            val lowerName = modelFileName.lowercase()
+            if (lowerName.endsWith(".task")) {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(modelFile.absolutePath)
                     .setMaxTokens(1024)
@@ -78,7 +99,7 @@ object OnDeviceLlmManager {
                 currentModelName = modelFileName
                 Log.d(TAG, "MediaPipe Task Model loaded successfully: $modelFileName")
                 Result.success("Loaded MediaPipe Model '$modelFileName' (${modelFile.length() / 1024 / 1024}MB)")
-            } else if (modelFileName.endsWith(".onnx")) {
+            } else if (lowerName.endsWith(".onnx")) {
                 currentModelName = modelFileName
                 Log.d(TAG, "ONNX Navigation Model selected: $modelFileName")
                 Result.success("Selected ONNX Pointer Network '$modelFileName' (${modelFile.length() / 1024} KB)")
@@ -98,7 +119,7 @@ object OnDeviceLlmManager {
      * Generate a response from the on-device model.
      */
     fun generateResponse(systemPrompt: String, userPrompt: String): String {
-        if (currentModelName.endsWith(".onnx")) {
+        if (currentModelName.lowercase().endsWith(".onnx")) {
             // ONNX model prediction fallback for demo / test
             return "{\"type\":\"CLICK\",\"targetId\":19,\"reply\":\"ONNX Pointer Network selected target element [19]\"}"
         }
