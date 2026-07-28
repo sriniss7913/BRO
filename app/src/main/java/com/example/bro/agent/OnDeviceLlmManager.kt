@@ -140,9 +140,6 @@ object OnDeviceLlmManager {
         prefs.edit().putString(KEY_SELECTED_MODEL, modelFileName).apply()
     }
 
-    /**
-     * Generate a response using on-device inference or ONNX navigation rules.
-     */
     fun generateResponse(systemPrompt: String, userPrompt: String): String {
         val lowerPrompt = userPrompt.lowercase()
 
@@ -154,21 +151,19 @@ object OnDeviceLlmManager {
             }
         }
 
-        // 2. If System UI dialog is covering screen (e.g. background activity, system popups)
+        // 2. If System UI dialog is covering screen
         if (userPrompt.contains("Current App: com.android.systemui")) {
-            // If Done / Close button exists, click it to dismiss
             val doneMatcher = Pattern.compile("\\[(\\d+)\\]\\s*(Done|Close|Dismiss|Cancel)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
             if (doneMatcher.find()) {
                 val doneId = doneMatcher.group(1) ?: "1"
                 Log.d(TAG, "On-device Rule: Dismissing System UI overlay via id [$doneId]")
                 return "{\"type\":\"CLICK\",\"targetId\":$doneId,\"reply\":\"Dismissing system overlay\"}"
             }
-            // Otherwise force jump back to WhatsApp
             Log.d(TAG, "On-device Rule: System UI active, re-launching WhatsApp")
             return "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Re-opening WhatsApp\"}"
         }
 
-        // 3. If ONNX model is selected, match screen elements dynamically
+        // 3. If ONNX model is selected
         if (currentModelName.lowercase().endsWith(".onnx")) {
             return predictOnnxAction(userPrompt)
         }
@@ -201,6 +196,12 @@ object OnDeviceLlmManager {
     private fun predictOnnxAction(userPrompt: String): String {
         val lowerPrompt = userPrompt.lowercase()
 
+        // If inside Camera view (e.g. "Switch to front camera", "Flash off"), press BACK to exit camera!
+        if (lowerPrompt.contains("camera") || lowerPrompt.contains("flash off") || lowerPrompt.contains("ar effect")) {
+            Log.d(TAG, "ONNX Pointer: Inside Camera screen, issuing BACK action to return to chat")
+            return "{\"type\":\"BACK\",\"reply\":\"Exiting camera\"}"
+        }
+
         // Extract goal target contact name (e.g. "Ramesh")
         var targetName = "Ramesh"
         val goalMatcher = Pattern.compile("goal:\\s*([^\\n]+)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
@@ -218,6 +219,13 @@ object OnDeviceLlmManager {
             val id = elementMatcher.group(1)?.toIntOrNull() ?: continue
             val text = elementMatcher.group(2)?.trim() ?: ""
             val tags = elementMatcher.group(3) ?: ""
+
+            // Filter out camera / flash / status bar icons from selection candidates
+            val lowerText = text.lowercase()
+            if (lowerText.contains("camera") || lowerText.contains("flash") || lowerText.contains("ar effect") || lowerText.contains("status_bar")) {
+                continue
+            }
+
             elements.add(Triple(id, text, tags))
         }
 
@@ -248,7 +256,7 @@ object OnDeviceLlmManager {
             return "{\"type\":\"TYPE\",\"targetId\":${sendMatch.first},\"text\":\"hi\",\"reply\":\"Typing message\"}"
         }
 
-        // Fallback: Click first clickable item or finish
+        // Fallback: Click first valid candidate item or finish
         val firstClickable = elements.firstOrNull()
         if (firstClickable != null) {
             return "{\"type\":\"CLICK\",\"targetId\":${firstClickable.first},\"reply\":\"Clicking ${firstClickable.second}\"}"
