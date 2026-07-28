@@ -901,53 +901,12 @@ suspend fun executeGoalWithPlanner(
         val root = service.getRoot()
         val screen = if (root != null) screenReader.read(root) else ScreenState("", emptyList())
 
-        // Optimization 1: Direct Item Matcher (0 Tokens LLM bypass!)
-        val directMatchAction = if (screen.packageName != context.packageName) {
-            com.example.bro.planner.DirectElementMatcher.findDirectMatch(goalStr, screen)
-        } else null
-
-        // Optimization 2: READ Intent Auto-Finish (0 Tokens LLM bypass!)
-        if (taskIntent == com.example.bro.planner.TaskIntent.READ && screen.packageName != context.packageName) {
-            val screenPromptText = screenReader.toPrompt(screen)
-            val isInsideChatOrDetails = screenPromptText.contains("YOU ARE INSIDE THE CHAT") ||
-                screen.nodes.any { it.text?.toString()?.lowercase()?.contains("end-to-end") == true }
-
-            if (isInsideChatOrDetails) {
-                val visibleTexts = screen.nodes.mapNotNull {
-                    it.text?.trim() ?: it.contentDescription?.trim()
-                }.filter { text ->
-                    text.length > 2 &&
-                        !text.contains("com.") &&
-                        !text.equals("Search", ignoreCase = true) &&
-                        !text.equals("Chats", ignoreCase = true) &&
-                        !text.equals("Calls", ignoreCase = true) &&
-                        !text.equals("Status", ignoreCase = true) &&
-                        !text.equals("Communities", ignoreCase = true)
-                }.distinct()
-
-                if (visibleTexts.isNotEmpty()) {
-                    val summaryText = "Read complete.\n\n📱 Screen Items Read:\n" + visibleTexts.take(20).joinToString("\n") { "• $it" }
-                    messages.add(Message("✅ $summaryText", false))
-                    returnToBroApp(context)
-                    return
-                }
-            }
-        }
-
-        val decision = if (directMatchAction != null) {
-            Log.d("BRO_PLANNER", "⚡ Direct Match found! Skipping LLM call: ${directMatchAction.summary}")
-            com.example.bro.model.PlannerResponse(
-                thought = directMatchAction.summary ?: "Direct item match found",
-                action = directMatchAction
-            )
-        } else {
-            planner.plan(
-                goal = Goal(goalStr),
-                screen = screen,
-                memory = memory,
-                context = context
-            )
-        }
+        val decision = planner.plan(
+            goal = Goal(goalStr),
+            screen = screen,
+            memory = memory,
+            context = context
+        )
 
         var action = decision.action
         val thought = decision.thought
