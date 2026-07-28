@@ -154,12 +154,26 @@ object OnDeviceLlmManager {
             }
         }
 
-        // 2. If ONNX model is selected, match screen elements dynamically
+        // 2. If System UI dialog is covering screen (e.g. background activity, system popups)
+        if (userPrompt.contains("Current App: com.android.systemui")) {
+            // If Done / Close button exists, click it to dismiss
+            val doneMatcher = Pattern.compile("\\[(\\d+)\\]\\s*(Done|Close|Dismiss|Cancel)", Pattern.CASE_INSENSITIVE).matcher(userPrompt)
+            if (doneMatcher.find()) {
+                val doneId = doneMatcher.group(1) ?: "1"
+                Log.d(TAG, "On-device Rule: Dismissing System UI overlay via id [$doneId]")
+                return "{\"type\":\"CLICK\",\"targetId\":$doneId,\"reply\":\"Dismissing system overlay\"}"
+            }
+            // Otherwise force jump back to WhatsApp
+            Log.d(TAG, "On-device Rule: System UI active, re-launching WhatsApp")
+            return "{\"type\":\"OPEN_APP\",\"target\":\"WhatsApp\",\"reply\":\"Re-opening WhatsApp\"}"
+        }
+
+        // 3. If ONNX model is selected, match screen elements dynamically
         if (currentModelName.lowercase().endsWith(".onnx")) {
             return predictOnnxAction(userPrompt)
         }
 
-        // 3. Fallback to MediaPipe LlmInference
+        // 4. Fallback to MediaPipe LlmInference
         val inference = llmInference
             ?: throw Exception("No on-device MediaPipe model loaded. Load a model in Settings → 📱 On-Device")
 
