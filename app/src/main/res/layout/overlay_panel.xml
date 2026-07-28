@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+
+    android:layout_width="320dp"
+    android:layout_height="420dp"
+
+    android:orientation="vertical"
+
+    android:padding="12dp"
+
+    android:background="@android:color/white">
+
+    <TextView
+        android:id="@+id/title"
+
+        android:text="BRO"
+
+        android:textSize="22sp"
+
+        android:textStyle="bold"
+
+        android:layout_width="match_parent"
+
+        android:layout_height="wrap_content"/>
+
+    <TextView
+
+        android:id="@+id/status"
+
+        android:text="Ready"
+
+        android:layout_width="wrap_content"
+
+        android:layout_height="wrap_content"/>
+
+    <EditText
+
+        android:id="@+id/input"
+
+        android:hint="Type a command..."
+
+        android:layout_width="match_parent"
+
+        android:layout_height="wrap_content"/>
+
+    <Button
+
+        android:id="@+id/send"
+
+        android:text="Send"
+
+        android:layout_width="match_parent"
+
+        android:layout_height="wrap_content"/>
+
+</LinearLayout>

@@ -1,0 +1,240 @@
+package com.example.bro.network
+
+import android.util.Log
+import kotlinx.coroutines.delay
+
+class GroqRepository(
+    private val api: GroqApi = RetrofitClient.api
+) {
+
+    companion object {
+
+        // IMPORTANT:
+        // Do not ship a permanent API key inside the APK.
+        // We'll move this to secure/local configuration later.
+        var apiKey: String = "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"
+
+        private val MODELS = listOf(
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "gemma2-9b-it",
+            "mixtral-8x7b-32768"
+        )
+
+        // Models that have hit their daily quota.
+        private val tpdExhaustedModels = mutableSetOf<String>()
+
+        private var lastCallMs = 0L
+        private const val MIN_INTERVAL_MS = 500L
+
+        // Token statistics for this app process.
+        private var requestCount = 0
+        private var successfulCallCount = 0
+
+        private var cumulativePromptTokens = 0L
+        private var cumulativeCompletionTokens = 0L
+        private var cumulativeTotalTokens = 0L
+    }
+
+    suspend fun sendPrompt(
+        systemPrompt: String,
+        userPrompt: String
+    ): String {
+
+        val now = System.currentTimeMillis()
+        val waitMs = MIN_INTERVAL_MS - (now - lastCallMs)
+
+        if (waitMs > 0) {
+            delay(waitMs)
+        }
+
+        lastCallMs = System.currentTimeMillis()
+
+        val key = apiKey.trim()
+
+        if (key.isBlank() || key == "PUT_YOUR_NEW_GROQ_API_KEY_HERE") {
+            throw Exception(
+                "Groq API key is missing. Please enter your API key in Settings."
+            )
+        }
+
+        var lastException: Exception? = null
+
+        for (modelName in MODELS) {
+
+            if (tpdExhaustedModels.contains(modelName)) {
+                Log.d(
+                    "BRO_GROQ",
+                    "Skipping exhausted model=$modelName"
+                )
+                continue
+            }
+
+            val request = GroqRequest(
+                model = modelName,
+                messages = listOf(
+                    Message(
+                        role = "system",
+                        content = systemPrompt
+                    ),
+                    Message(
+                        role = "user",
+                        content = userPrompt
+                    )
+                )
+            )
+
+            requestCount++
+
+            val currentRequest = requestCount
+
+            Log.d(
+                "BRO_GROQ",
+                "REQUEST #$currentRequest | model=$modelName"
+            )
+
+            Log.d(
+                "BRO_GROQ",
+                "Prompt chars | system=${systemPrompt.length} | " +
+                        "user=${userPrompt.length} | " +
+                        "total=${systemPrompt.length + userPrompt.length}"
+            )
+
+            val startTime = System.currentTimeMillis()
+
+            try {
+
+                val response = api.chat(
+                    authorization = "Bearer $key",
+                    request = request
+                )
+
+                val durationMs =
+                    System.currentTimeMillis() - startTime
+
+                if (response.isSuccessful) {
+
+                    val body = response.body()
+                        ?: throw Exception(
+                            "Empty response from Groq API"
+                        )
+
+                    val usage = body.usage
+
+                    val promptTokens =
+                        usage?.prompt_tokens ?: 0
+
+                    val completionTokens =
+                        usage?.completion_tokens ?: 0
+
+                    val totalTokens =
+                        usage?.total_tokens ?: 0
+
+                    successfulCallCount++
+
+                    cumulativePromptTokens += promptTokens
+                    cumulativeCompletionTokens += completionTokens
+                    cumulativeTotalTokens += totalTokens
+
+                    Log.d(
+                        "BRO_TOKEN",
+                        "REQUEST #$currentRequest | " +
+                                "model=$modelName | " +
+                                "input=$promptTokens | " +
+                                "output=$completionTokens | " +
+                                "total=$totalTokens | " +
+                                "time=${durationMs}ms"
+                    )
+
+                    Log.d(
+                        "BRO_TOKEN",
+                        "SESSION TOTAL | " +
+                                "successful_calls=$successfulCallCount | " +
+                                "input=$cumulativePromptTokens | " +
+                                "output=$cumulativeCompletionTokens | " +
+                                "total=$cumulativeTotalTokens"
+                    )
+
+                    return body.choices
+                        .firstOrNull()
+                        ?.message
+                        ?.content
+                        ?: throw Exception(
+                            "No response choice returned by Groq API"
+                        )
+                }
+
+                val code = response.code()
+
+                val errorMsg =
+                    response.errorBody()?.string()
+                        ?: response.message()
+
+                Log.w(
+                    "BRO_GROQ",
+                    "REQUEST #$currentRequest FAILED | " +
+                            "model=$modelName | " +
+                            "code=$code | " +
+                            "time=${durationMs}ms"
+                )
+
+                if (
+                    code == 429 ||
+                    code == 400 ||
+                    errorMsg.contains(
+                        "limit",
+                        ignoreCase = true
+                    )
+                ) {
+
+                    Log.w(
+                        "GROQ_REPOSITORY",
+                        "Model $modelName quota/limit reached ($code). " +
+                                "Marking exhausted and trying fallback."
+                    )
+
+                    tpdExhaustedModels.add(modelName)
+
+                    lastException =
+                        Exception(
+                            "Model $modelName daily limit reached"
+                        )
+
+                    continue
+                }
+
+                Log.w(
+                    "GROQ_REPOSITORY",
+                    "Model $modelName error " +
+                            "($code: $errorMsg). " +
+                            "Trying fallback model."
+                )
+
+                lastException =
+                    Exception(
+                        "Groq API Error ($code): $errorMsg"
+                    )
+
+            } catch (e: Exception) {
+
+                Log.e(
+                    "GROQ_REPOSITORY",
+                    "REQUEST #$currentRequest | " +
+                            "Exception on model $modelName: ${e.message}"
+                )
+
+                lastException = e
+            }
+        }
+
+        tpdExhaustedModels.clear()
+
+        throw lastException
+            ?: Exception(
+                "All Groq models exhausted token limit. " +
+                        "Please try again in a few minutes."
+            )
+    }
+}
