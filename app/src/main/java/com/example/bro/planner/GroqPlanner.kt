@@ -228,8 +228,6 @@ Respond with ONE JSON action only. No explanation. No extra text.
         memory: AgentMemory
     ): String {
         val rawPrompt = screenReader.toPrompt(screen)
-
-        // Post-process: if we detect "INSIDE THE CHAT", strip header elements completely
         val processedPrompt = if (rawPrompt.contains("YOU ARE INSIDE THE CHAT")) {
             rawPrompt.lines().filter { line ->
                 !line.contains("[HEADER - DO NOT CLICK]")
@@ -238,7 +236,15 @@ Respond with ONE JSON action only. No explanation. No extra text.
             rawPrompt
         }
 
+        val hasActiveSearchBox = screen.nodes.any { node ->
+            val t = (node.text ?: node.contentDescription ?: "").toString().lowercase()
+            node.editable && (t.contains("name, number") || t.contains("search") || t.contains("type a name"))
+        }
+
         return buildString {
+            if (hasActiveSearchBox && !processedPrompt.contains("YOU ARE INSIDE THE CHAT")) {
+                appendLine("⚠️ SEARCH BAR IS OPEN: Type the target contact/item name into the [CHAT INPUT BOX - TYPE HERE] element now. DO NOT click contacts below until searched!\n")
+            }
             append(processedPrompt)
             if (memory.previousActions.isNotEmpty()) {
                 appendLine("History:")
