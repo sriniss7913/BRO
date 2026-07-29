@@ -341,12 +341,19 @@ fun BroApp() {
                                         .background(if (isRunningTask) JarvisCyan else JarvisGreen)
                                 )
                             }
+                            val activeModelDisplay = when (providerMode) {
+                                "GROQ" -> selectedGroqModel
+                                "ON_DEVICE" -> com.example.bro.agent.OnDeviceLlmManager.loadedModelName.ifBlank { "ON-DEVICE" }
+                                "LOCAL_PC" -> localModelName
+                                else -> "GROQ"
+                            }
                             Text(
-                                text = if (isRunningTask) "STATUS: EXECUTING AUTOMATION..." else if (GroqRepository.apiKey.isNotBlank()) "STATUS: ONLINE // READY" else "⚠️ API KEY MISSING",
+                                text = if (isRunningTask) "STATUS: EXECUTING AUTOMATION..." else "MODEL: $activeModelDisplay",
                                 style = MaterialTheme.typography.bodySmall,
-                                fontSize = 11.sp,
-                                color = if (isRunningTask) JarvisCyan else JarvisTextSecondary,
-                                fontFamily = FontFamily.Monospace
+                                fontSize = 10.sp,
+                                color = if (isRunningTask) JarvisCyan else JarvisCyan.copy(alpha = 0.8f),
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -890,39 +897,58 @@ fun BroApp() {
                                 val currentModelLabel = groqModels.firstOrNull { it.first == selectedGroqModel }?.second ?: selectedGroqModel
 
                                 Box(modifier = Modifier.fillMaxWidth()) {
-                                    OutlinedTextField(
-                                        value = currentModelLabel,
-                                        onValueChange = {},
-                                        readOnly = true,
-                                        modifier = Modifier.fillMaxWidth().clickable { modelDropdownExpanded = true },
-                                        enabled = false,
-                                        colors = OutlinedTextFieldDefaults.colors(
-                                            disabledBorderColor = JarvisCyan,
-                                            disabledTextColor = JarvisTextPrimary
-                                        ),
-                                        trailingIcon = {
-                                            IconButton(onClick = { modelDropdownExpanded = true }) {
-                                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Select Model", tint = JarvisCyan)
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = Color(0xFF0D182E),
+                                        border = BorderStroke(1.dp, JarvisCyan),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { modelDropdownExpanded = true }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 12.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column {
+                                                Text(currentModelLabel, color = JarvisCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                                Text("Selected ID: $selectedGroqModel", color = JarvisTextSecondary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
                                             }
+                                            Icon(
+                                                imageVector = Icons.Default.ArrowDropDown,
+                                                contentDescription = "Select Model",
+                                                tint = JarvisCyan
+                                            )
                                         }
-                                    )
+                                    }
+
                                     DropdownMenu(
                                         expanded = modelDropdownExpanded,
                                         onDismissRequest = { modelDropdownExpanded = false },
-                                        modifier = Modifier.background(Color(0xFF0D182E))
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.85f)
+                                            .background(Color(0xFF0B1626))
+                                            .border(BorderStroke(1.dp, JarvisCyan), RoundedCornerShape(8.dp))
                                     ) {
                                         groqModels.forEach { (modelId, label) ->
                                             DropdownMenuItem(
                                                 text = {
-                                                    Text(
-                                                        label,
-                                                        color = if (modelId == selectedGroqModel) JarvisCyan else Color.White,
-                                                        fontWeight = if (modelId == selectedGroqModel) FontWeight.Bold else FontWeight.Normal
-                                                    )
+                                                    Column {
+                                                        Text(
+                                                            label,
+                                                            color = if (modelId == selectedGroqModel) JarvisCyan else Color.White,
+                                                            fontWeight = if (modelId == selectedGroqModel) FontWeight.Bold else FontWeight.Normal,
+                                                            fontSize = 12.sp
+                                                        )
+                                                        Text(modelId, color = JarvisTextSecondary, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+                                                    }
                                                 },
                                                 onClick = {
                                                     selectedGroqModel = modelId
                                                     GroqRepository.selectedGroqModel = modelId
+                                                    prefs.edit().putString("selected_groq_model", modelId).apply()
                                                     modelDropdownExpanded = false
                                                 }
                                             )
