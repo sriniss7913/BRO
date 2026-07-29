@@ -15,3 +15,12 @@ data class ChatResponse(
     val milliseconds: Long? = null,
     val actions: List<ChatResponse>? = null
 )
+
+// isQuestion=true → renders Yes/No buttons instead of plain text
+// pendingGoal → the original task goal to resume when user taps Yes
+data class Message(
+    val text: String,
+    val isUser: Boolean,
+    val isQuestion: Boolean = false,
+    val pendingGoal: String = ""
+)

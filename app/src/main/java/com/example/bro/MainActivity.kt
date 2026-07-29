@@ -55,10 +55,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-data class Message(
-    val text: String,
-    val isUser: Boolean
-)
+
 
 class MainActivity : ComponentActivity() {
 
@@ -175,8 +172,11 @@ fun BroApp() {
     var feedbackScreen by remember { mutableStateOf<ScreenState?>(null) }
     var isTrainingActive by remember { mutableStateOf(false) }
 
-    fun startTask(commandText: String) {
-        if (commandText.isBlank()) return
+    // Tracks the original goal that was paused when AI asked a question
+    var pendingQuestionGoal by remember { mutableStateOf("") }
+
+    fun startTask(commandText: String, resumedGoal: String? = null) {
+        if (commandText.isBlank() && resumedGoal == null) return
 
         if (commandText.equals("inspect screen", true)) {
             val service = BroAccessibilityService.instance
@@ -186,22 +186,27 @@ fun BroApp() {
             return
         }
 
-        messages.add(Message(commandText, true))
-
         // Fact Registration Check (e.g. "my name is srini")
         val factReply = com.example.bro.agent.UserConversationMemory.processFactRegistration(context, commandText)
         if (factReply != null) {
+            messages.add(Message(commandText, true))
             messages.add(Message(factReply, false))
             com.example.bro.agent.UserConversationMemory.addTurn(context, commandText, commandText, factReply)
             return
         }
 
-        // Contextual Goal Resolution (e.g. "what about pasu" -> "check recent message for pasu")
-        val resolvedGoal = com.example.bro.agent.UserConversationMemory.resolveGoalWithContext(context, commandText)
-        if (resolvedGoal.lowercase() != commandText.lowercase()) {
+        // If resuming after a Yes answer, don't re-add the user message bubble
+        if (resumedGoal == null) {
+            messages.add(Message(commandText, true))
+        }
+
+        // Contextual Goal Resolution
+        val resolvedGoal = resumedGoal ?: com.example.bro.agent.UserConversationMemory.resolveGoalWithContext(context, commandText)
+        if (resumedGoal == null && resolvedGoal.lowercase() != commandText.lowercase()) {
             messages.add(Message("💡 Context linked: Target task → \"$resolvedGoal\"", false))
         }
 
+        pendingQuestionGoal = ""
         agentJob?.cancel()
         agentJob = scope.launch {
             isRunningTask = true
@@ -216,6 +221,14 @@ fun BroApp() {
                     onComplete = { goal, screen, actions ->
                         tempScreen = screen
                         tempActions = actions
+                    },
+                    onQuestion = { question, originalGoal ->
+                        // Mark the last added CHAT message as a question with Yes/No buttons
+                        pendingQuestionGoal = originalGoal
+                        val idx = messages.indexOfLast { !it.isUser }
+                        if (idx >= 0) {
+                            messages[idx] = messages[idx].copy(isQuestion = true, pendingGoal = originalGoal)
+                        }
                     }
                 )
             } catch (e: CancellationException) {
@@ -451,10 +464,14 @@ fun BroApp() {
                                 bottomStart = if (message.isUser) 16.dp else 4.dp,
                                 bottomEnd = if (message.isUser) 4.dp else 16.dp
                             ),
-                            color = if (message.isUser) Color(0xDD0055B3) else Color(0xDD0D182E),
+                            color = if (message.isUser) Color(0xDD0055B3)
+                                    else if (message.isQuestion) Color(0xDD1A1000)
+                                    else Color(0xDD0D182E),
                             border = BorderStroke(
                                 1.dp,
-                                if (message.isUser) Color(0x6600E5FF) else Color(0x3300E5FF)
+                                if (message.isUser) Color(0x6600E5FF)
+                                else if (message.isQuestion) Color(0xAAF59E0B)
+                                else Color(0x3300E5FF)
                             ),
                             modifier = Modifier.widthIn(max = 300.dp)
                         ) {
@@ -466,41 +483,81 @@ fun BroApp() {
                                     lineHeight = 20.sp
                                 )
 
-                                Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(8.dp))
 
-                                // Quick Copy Button
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.End,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
+                                if (message.isQuestion) {
+                                    // Yes / No quick-reply buttons for approval questions
                                     Row(
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .background(Color(0x3300E5FF))
-                                            .clickable {
-                                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                val clip = ClipData.newPlainText("BRO_Message", message.text)
-                                                clipboard.setPrimaryClip(clip)
-                                                Toast.makeText(context, "📋 Copied message to clipboard!", Toast.LENGTH_SHORT).show()
-                                            }
-                                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                // Replace question bubble with user's "Yes" reply
+                                                val idx = messages.indexOf(message)
+                                                if (idx >= 0) messages[idx] = message.copy(isQuestion = false)
+                                                messages.add(Message("✅ Yes, proceed", true))
+                                                // Resume the original task with approval context
+                                                startTask("", resumedGoal = "${message.pendingGoal}. User confirmed: Yes")
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("✅ Yes", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        Button(
+                                            onClick = {
+                                                val idx = messages.indexOf(message)
+                                                if (idx >= 0) messages[idx] = message.copy(isQuestion = false)
+                                                messages.add(Message("❌ No, cancel", true))
+                                                messages.add(Message("🚫 Task cancelled.", false))
+                                                agentJob?.cancel()
+                                                isRunningTask = false
+                                                pendingQuestionGoal = ""
+                                            },
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
+                                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Text("❌ No", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                } else {
+                                    // Quick Copy Button
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.End,
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Share,
-                                            contentDescription = "Copy Text",
-                                            tint = JarvisCyan,
-                                            modifier = Modifier.size(12.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text(
-                                            text = "COPY",
-                                            fontSize = 9.sp,
-                                            color = JarvisCyan,
-                                            fontFamily = FontFamily.Monospace,
-                                            fontWeight = FontWeight.Bold
-                                        )
+                                        Row(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(6.dp))
+                                                .background(Color(0x3300E5FF))
+                                                .clickable {
+                                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                                    val clip = ClipData.newPlainText("BRO_Message", message.text)
+                                                    clipboard.setPrimaryClip(clip)
+                                                    Toast.makeText(context, "📋 Copied message to clipboard!", Toast.LENGTH_SHORT).show()
+                                                }
+                                                .padding(horizontal = 6.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Share,
+                                                contentDescription = "Copy Text",
+                                                tint = JarvisCyan,
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "COPY",
+                                                fontSize = 9.sp,
+                                                color = JarvisCyan,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1284,7 +1341,8 @@ suspend fun executeGoalWithPlanner(
     goalStr: String,
     userOriginalPrompt: String = goalStr,
     messages: MutableList<Message>,
-    onComplete: ((goal: String, screen: ScreenState?, actions: List<com.example.bro.model.Action>) -> Unit)? = null
+    onComplete: ((goal: String, screen: ScreenState?, actions: List<com.example.bro.model.Action>) -> Unit)? = null,
+    onQuestion: ((question: String, originalGoal: String) -> Unit)? = null
 ) {
     val normalizedGoal = goalStr.lowercase()
     val trimmedGoal = normalizedGoal.trim()
@@ -1459,6 +1517,7 @@ suspend fun executeGoalWithPlanner(
                     } else if (chatText.isNotBlank()) {
                         messages.add(Message("❓ $chatText", false))
                         com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
+                        onQuestion?.invoke(chatText, goalStr)
                         returnToBroApp(context)
                         return
                     }
