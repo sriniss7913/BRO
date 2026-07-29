@@ -1607,11 +1607,34 @@ suspend fun executeGoalWithPlanner(
                         com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
                         return
                     } else if (chatText.isNotBlank()) {
-                        messages.add(Message("❓ $chatText", false))
-                        com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
-                        onQuestion?.invoke(chatText, goalStr)
-                        returnToBroApp(context)
-                        return
+                        // AUTO-RECOVERY FOR WHATSAPP: If on WhatsApp main screen and model produced CHAT, auto-click Search
+                        if (screen.packageName == "com.whatsapp") {
+                            val searchNode = screen.nodes.firstOrNull {
+                                val txt = (it.text ?: it.contentDescription ?: "").lowercase()
+                                txt.contains("search") || txt.contains("ask meta")
+                            }
+                            if (searchNode != null) {
+                                messages.add(Message("⚡ Auto-Recovering: Clicking Search bar in WhatsApp...", false))
+                                executor.execute(com.example.bro.model.Action(type = ActionType.CLICK, targetId = searchNode.id))
+                                delay(1200)
+                                break
+                            }
+                        }
+
+                        val isRealQuestion = chatText.contains("?") ||
+                                chatText.lowercase().contains("which app") ||
+                                chatText.lowercase().contains("which contact")
+
+                        if (isRealQuestion) {
+                            messages.add(Message("❓ $chatText", false))
+                            com.example.bro.agent.UserConversationMemory.addTurn(context, userOriginalPrompt, goalStr, chatText)
+                            onQuestion?.invoke(chatText, goalStr)
+                            returnToBroApp(context)
+                            return
+                        } else {
+                            // Model chatter or error while in external app: log warning and continue planning loop
+                            messages.add(Message("⚠️ Model chatter: ${chatText.take(100)}...", false))
+                        }
                     }
                     delay(1000)
                 }

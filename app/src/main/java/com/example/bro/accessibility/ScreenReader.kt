@@ -132,6 +132,15 @@ class ScreenReader {
                     hasBackButton &&
                     hasChatIndicators
 
+        val isWhatsAppArchived =
+            isWhatsApp &&
+                    hasBackButton &&
+                    !hasChatIndicators &&
+                    screen.nodes.any {
+                        val value = label(it).lowercase()
+                        value == "archived" || value.contains("these chats stay archived")
+                    }
+
         /*
          * Find high-priority interactive elements.
          *
@@ -160,7 +169,7 @@ class ScreenReader {
                     value == "back"
         }
 
-        val isWhatsAppMainList = isWhatsApp && !isInsideChat
+        val isWhatsAppMainList = isWhatsApp && !isInsideChat && !isWhatsAppArchived
 
         if (isInsideChat) {
             builder.append(
@@ -171,9 +180,13 @@ class ScreenReader {
                         "TYPE requires an editable input element. " +
                         "After typing, CLICK the Send element.\n\n"
             )
-        }
-
-        if (isWhatsAppMainList) {
+        } else if (isWhatsAppArchived) {
+            builder.append(
+                "STATUS: INSIDE WHATSAPP ARCHIVED CHATS SCREEN.\n" +
+                "IMPORTANT: You are currently inside the Archived Chats folder, NOT the main chats list.\n" +
+                "If you need to find or message a contact from the main list, CLICK the 'Back' element first!\n\n"
+            )
+        } else if (isWhatsAppMainList) {
             builder.append(
                 "STATUS: ON WHATSAPP MAIN CHATS SCREEN.\n" +
                 "IMPORTANT: To find a contact not visible in the list, you MUST use the Search element.\n" +

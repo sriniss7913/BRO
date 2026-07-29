@@ -64,7 +64,7 @@ class GroqRepository(
             }
             Log.d("BRO_GROQ", "Sending prompt to On-Device Model (${com.example.bro.agent.OnDeviceLlmManager.loadedModelName}) on Dispatchers.IO...")
             try {
-                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.IO) {
                     com.example.bro.agent.OnDeviceLlmManager.generateResponse(systemPrompt, userPrompt)
                 }
                 if (result.isBlank()) {

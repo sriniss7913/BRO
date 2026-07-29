@@ -42,17 +42,48 @@ object UserConversationMemory {
     fun getTurns(context: Context): MutableList<ConversationTurn> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val json = prefs.getString(KEY_TURNS, null) ?: return mutableListOf()
-        return try {
+        val rawTurns = try {
             val type = object : TypeToken<MutableList<ConversationTurn>>() {}.type
-            gson.fromJson(json, type) ?: mutableListOf()
+            gson.fromJson<MutableList<ConversationTurn>>(json, type) ?: mutableListOf()
         } catch (e: Exception) {
             mutableListOf()
+        }
+
+        // Filter out corrupted error turns / java explanations from stored history
+        return rawTurns.filterTo(mutableListOf()) { turn ->
+            val reply = turn.assistantReply.lowercase()
+            !reply.contains("resetapp") &&
+            !reply.contains("public class") &&
+            !reply.contains("system.out") &&
+            !reply.contains("message.ondone") &&
+            !reply.contains("standalonecoroutine") &&
+            !reply.contains("error") &&
+            !reply.contains("issue you're")
         }
     }
 
     fun addTurn(context: Context, userPrompt: String, resolvedGoal: String, reply: String) {
+        val rawReply = reply.trim()
+
+        // Ignore raw errors or coroutine cancellation stack traces from being stored as conversation history
+        if (rawReply.contains("❌") ||
+            rawReply.contains("Groq Error") ||
+            rawReply.contains("StandaloneCoroutine") ||
+            rawReply.contains("Model error")
+        ) {
+            return
+        }
+
+        val cleanReply = rawReply
+            .replace(Regex("```[a-zA-Z]*\\n[\\s\\S]*?```"), "") // Strip out code blocks
+            .replace("\n", " ")
+            .trim()
+            .take(120)
+
+        if (cleanReply.isBlank()) return
+
         val turns = getTurns(context)
-        turns.add(ConversationTurn(userPrompt, resolvedGoal, reply))
+        turns.add(ConversationTurn(userPrompt, resolvedGoal, cleanReply))
         // Keep last 10 turns for token budget
         if (turns.size > 10) {
             turns.removeAt(0)
@@ -130,7 +161,13 @@ object UserConversationMemory {
     fun buildMemoryPromptContext(context: Context): String {
         val sb = StringBuilder()
         val facts = getFacts(context)
-        val turns = getTurns(context)
+        val turns = getTurns(context).filter { turn ->
+            val reply = turn.assistantReply.lowercase()
+            !reply.contains("resetapp") &&
+            !reply.contains("public class") &&
+            !reply.contains("system.out") &&
+            !reply.contains("error")
+        }
 
         if (facts.isNotEmpty()) {
             sb.append("USER MEMORY & KNOWN FACTS:\n")
@@ -142,7 +179,7 @@ object UserConversationMemory {
 
         if (turns.isNotEmpty()) {
             sb.append("RECENT CONVERSATION HISTORY (Use to relate user requests):\n")
-            turns.takeLast(4).forEachIndexed { i, turn ->
+            turns.takeLast(3).forEachIndexed { i, turn ->
                 sb.append("• Turn ${i + 1}: User: \"${turn.userPrompt}\" → Task Goal: \"${turn.resolvedGoal}\" | Outcome: \"${turn.assistantReply}\"\n")
             }
             sb.append("\n")

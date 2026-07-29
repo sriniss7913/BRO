@@ -230,7 +230,7 @@ object OnDeviceLlmManager {
             try {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(targetFile.absolutePath)
-                    .setMaxTokens(512)
+                    .setMaxTokens(2048)
                     .build()
 
                 llmInference = LlmInference.createFromOptions(context, options)
@@ -249,7 +249,7 @@ object OnDeviceLlmManager {
             try {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(targetFile.absolutePath)
-                    .setMaxTokens(512)
+                    .setMaxTokens(2048)
                     .build()
 
                 llmInference = LlmInference.createFromOptions(context, options)
@@ -290,45 +290,81 @@ object OnDeviceLlmManager {
             .apply()
     }
 
-    suspend fun generateResponse(systemPrompt: String, userPrompt: String): String = engineMutex.withLock {
-        // 1. If ONNX model is loaded into OrtSession, run ONNX Runtime forward pass
+    suspend fun generateResponse(
+        systemPrompt: String,
+        userPrompt: String
+    ): String = engineMutex.withLock {
+
+        // ONNX path
         if (OnnxNavPredictor.isModelLoaded) {
-            Log.d(TAG, "Running pure ONNX Neural Network Forward Pass for $currentModelName")
-            return OnnxNavPredictor.predict(userPrompt)
+            Log.d(
+                TAG,
+                "Running pure ONNX Neural Network Forward Pass for $currentModelName"
+            )
+            return@withLock OnnxNavPredictor.predict(userPrompt)
         }
 
-        // 2. MediaPipe LlmInference engine
         val inference = llmInference
-        if (inference != null) {
-            val safeUserPrompt = if (userPrompt.length > 1200) {
-                userPrompt.take(1200) + "\n...[truncated for on-device memory]"
+            ?: throw Exception(
+                "No active MediaPipe model initialized for '$currentModelName'."
+            )
+
+        // Limit huge accessibility prompts.
+        val safeUserPrompt =
+            if (userPrompt.length > 1800) {
+                userPrompt.take(1800) + "\n...[truncated]"
             } else {
                 userPrompt
             }
 
-            val combinedPrompt = buildString {
+        // systemPrompt still comes from Bro's editable settings.
+        val isSmolLm = currentModelName.lowercase().contains("smollm") || currentModelName.lowercase().contains("qwen") || currentModelName.lowercase().contains("lora")
+        val combinedPrompt = if (isSmolLm) {
+            buildString {
+                append("<|system|>\n")
+                append(systemPrompt)
+                append("\n<|user|>\n")
+                append(safeUserPrompt)
+                append("\n<|assistant|>\n")
+            }
+        } else {
+            buildString {
                 append("<start_of_turn>user\n")
-                append(systemPrompt.take(800))
+                append(systemPrompt)
                 append("\n\n")
                 append(safeUserPrompt)
-                append("<end_of_turn>\n")
+                append("\n<end_of_turn>\n")
                 append("<start_of_turn>model\n")
             }
-
-            val startTime = System.currentTimeMillis()
-            val result = try {
-                inference.generateResponse(combinedPrompt)
-            } catch (t: Throwable) {
-                Log.e(TAG, "MediaPipe native inference failed: ${t.message}", t)
-                throw Exception("MediaPipe native model inference error: ${t.message ?: "Native engine exception"}")
-            }
-            val durationMs = System.currentTimeMillis() - startTime
-            Log.d(TAG, "MediaPipe inference complete in ${durationMs}ms (${result.length} chars output)")
-
-            return result.trim()
         }
 
-        throw Exception("No active MediaPipe or ONNX model instance initialized for '$currentModelName'. Please ensure the model file is a valid MediaPipe (.task/.bin/.litertlm) or ONNX (.onnx) model.")
+        Log.d(TAG, "LOCAL MODEL INPUT:\n$combinedPrompt")
+
+        val startTime = System.currentTimeMillis()
+
+        val rawResult: String = try {
+            inference.generateResponse(combinedPrompt)
+        } catch (t: Throwable) {
+            Log.e(TAG, "MediaPipe inference failed: ${t.message}", t)
+
+            throw Exception(
+                "MediaPipe model inference error: " +
+                        (t.message ?: "Unknown native inference error")
+            )
+        }
+
+        val durationMs = System.currentTimeMillis() - startTime
+
+        Log.d(
+            TAG,
+            "MediaPipe inference complete in ${durationMs}ms " +
+                    "(${rawResult.length} chars output)"
+        )
+
+        // This is what we need for debugging SmolLM.
+        Log.d(TAG, "LOCAL MODEL RAW OUTPUT:\n$rawResult")
+
+        return@withLock rawResult.trim()
     }
 
     fun close() {
