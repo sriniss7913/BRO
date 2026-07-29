@@ -16,14 +16,16 @@ class GroqRepository(
         var providerMode: String = "GROQ" // "GROQ" or "LOCAL_PC"
         var localPcUrl: String = "http://192.168.1.35:1234/v1/"
         var localModelName: String = "local-model"
+        var selectedGroqModel: String = "llama-3.3-70b-versatile"
 
         private val MODELS = listOf(
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
-            "llama3-70b-8192",
-            "llama3-8b-8192",
+            "deepseek-r1-distill-llama-70b",
             "gemma2-9b-it",
-            "mixtral-8x7b-32768"
+            "mixtral-8x7b-32768",
+            "llama3-70b-8192",
+            "llama3-8b-8192"
         )
 
         // Models that have hit their daily quota.
@@ -122,7 +124,10 @@ class GroqRepository(
 
         var lastException: Exception? = null
 
-        for (modelName in MODELS) {
+        val modelsToTry = mutableListOf(selectedGroqModel)
+        modelsToTry.addAll(MODELS.filter { it != selectedGroqModel })
+
+        for (modelName in modelsToTry) {
 
             if (tpdExhaustedModels.contains(modelName)) {
                 Log.d(

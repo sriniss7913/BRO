@@ -104,6 +104,14 @@ fun BroApp() {
         )
     }
 
+    var selectedGroqModel by remember {
+        mutableStateOf(prefs.getString("selected_groq_model", "llama-3.3-70b-versatile") ?: "llama-3.3-70b-versatile")
+    }
+
+    LaunchedEffect(selectedGroqModel) {
+        GroqRepository.selectedGroqModel = selectedGroqModel
+    }
+
     var providerMode by remember {
         mutableStateOf(prefs.getString("provider_mode", "GROQ") ?: "GROQ")
     }
@@ -865,6 +873,62 @@ fun BroApp() {
                                     fontSize = 11.sp,
                                     color = JarvisTextSecondary
                                 )
+                                Spacer(modifier = Modifier.height(10.dp))
+                                Text("Groq Model Selection:", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
+                                Spacer(modifier = Modifier.height(4.dp))
+
+                                var modelDropdownExpanded by remember { mutableStateOf(false) }
+                                val groqModels = listOf(
+                                    "llama-3.3-70b-versatile" to "Llama 3.3 70B (High Performance)",
+                                    "llama-3.1-8b-instant" to "Llama 3.1 8B (Ultra Fast)",
+                                    "deepseek-r1-distill-llama-70b" to "DeepSeek R1 70B (Reasoning)",
+                                    "gemma2-9b-it" to "Gemma 2 9B (Google)",
+                                    "mixtral-8x7b-32768" to "Mixtral 8x7B (MoE)",
+                                    "llama3-70b-8192" to "Llama 3 70B",
+                                    "llama3-8b-8192" to "Llama 3 8B"
+                                )
+                                val currentModelLabel = groqModels.firstOrNull { it.first == selectedGroqModel }?.second ?: selectedGroqModel
+
+                                Box(modifier = Modifier.fillMaxWidth()) {
+                                    OutlinedTextField(
+                                        value = currentModelLabel,
+                                        onValueChange = {},
+                                        readOnly = true,
+                                        modifier = Modifier.fillMaxWidth().clickable { modelDropdownExpanded = true },
+                                        enabled = false,
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            disabledBorderColor = JarvisCyan,
+                                            disabledTextColor = JarvisTextPrimary
+                                        ),
+                                        trailingIcon = {
+                                            IconButton(onClick = { modelDropdownExpanded = true }) {
+                                                Icon(Icons.Default.ArrowDropDown, contentDescription = "Select Model", tint = JarvisCyan)
+                                            }
+                                        }
+                                    )
+                                    DropdownMenu(
+                                        expanded = modelDropdownExpanded,
+                                        onDismissRequest = { modelDropdownExpanded = false },
+                                        modifier = Modifier.background(Color(0xFF0D182E))
+                                    ) {
+                                        groqModels.forEach { (modelId, label) ->
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        label,
+                                                        color = if (modelId == selectedGroqModel) JarvisCyan else Color.White,
+                                                        fontWeight = if (modelId == selectedGroqModel) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                },
+                                                onClick = {
+                                                    selectedGroqModel = modelId
+                                                    GroqRepository.selectedGroqModel = modelId
+                                                    modelDropdownExpanded = false
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
                             } else if (providerMode == "LOCAL_PC") {
                                 Text("Local PC Server Endpoint (OpenAI API):", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
                                 Text("Host on PC via LM Studio / Ollama (e.g. http://192.168.1.35:1234/v1/):", fontSize = 10.sp, color = JarvisTextSecondary)
@@ -1120,12 +1184,14 @@ fun BroApp() {
                                         GroqRepository.providerMode = providerMode
                                         GroqRepository.localPcUrl = localPcUrl.trim()
                                         GroqRepository.localModelName = localModelName.trim()
+                                        GroqRepository.selectedGroqModel = selectedGroqModel
 
                                         prefs.edit()
                                             .putString("groq_api_key", apiKey.trim())
                                             .putString("provider_mode", providerMode)
                                             .putString("local_pc_url", localPcUrl.trim())
                                             .putString("local_model_name", localModelName.trim())
+                                            .putString("selected_groq_model", selectedGroqModel)
                                             .apply()
 
                                         com.example.bro.planner.SystemPromptManager.saveSystemPrompt(context, systemPromptInput)

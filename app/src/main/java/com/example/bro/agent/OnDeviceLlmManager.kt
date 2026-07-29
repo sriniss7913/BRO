@@ -6,6 +6,8 @@ import android.os.Build
 import android.os.Environment
 import android.util.Log
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 
 /**
@@ -23,6 +25,7 @@ object OnDeviceLlmManager {
 
     var customModelDirPath: String = "/sdcard/BRO/"
 
+    private val engineMutex = Mutex()
     private var llmInference: LlmInference? = null
     private var currentModelName: String = ""
     private var currentModelPath: String = ""
@@ -287,7 +290,7 @@ object OnDeviceLlmManager {
             .apply()
     }
 
-    fun generateResponse(systemPrompt: String, userPrompt: String): String {
+    suspend fun generateResponse(systemPrompt: String, userPrompt: String): String = engineMutex.withLock {
         // 1. If ONNX model is loaded into OrtSession, run ONNX Runtime forward pass
         if (OnnxNavPredictor.isModelLoaded) {
             Log.d(TAG, "Running pure ONNX Neural Network Forward Pass for $currentModelName")
