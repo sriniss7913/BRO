@@ -22,6 +22,7 @@ object OnnxNavPredictor {
     private var loadedModelPath: String = ""
 
     val isModelLoaded: Boolean get() = ortSession != null
+    val currentModelPath: String get() = loadedModelPath
 
     fun loadModel(context: Context, modelFile: File): Boolean {
         return try {
@@ -30,7 +31,7 @@ object OnnxNavPredictor {
             val sessionOptions = OrtSession.SessionOptions()
             ortSession = ortEnv?.createSession(modelFile.absolutePath, sessionOptions)
             loadedModelPath = modelFile.absolutePath
-            Log.d(TAG, "Successfully initialized ONNXRuntime session for: ${modelFile.name}")
+            Log.d(TAG, "Successfully initialized ONNXRuntime session for: ${modelFile.name} (${modelFile.absolutePath})")
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load ONNX model ${modelFile.name}: ${e.message}", e)

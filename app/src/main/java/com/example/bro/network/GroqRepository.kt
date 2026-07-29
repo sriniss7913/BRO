@@ -60,9 +60,11 @@ class GroqRepository(
             if (!com.example.bro.agent.OnDeviceLlmManager.isModelLoaded) {
                 throw Exception("No on-device model loaded. Go to Settings → 📱 On-Device → Load Model")
             }
-            Log.d("BRO_GROQ", "Sending prompt to On-Device Model (${com.example.bro.agent.OnDeviceLlmManager.loadedModelName})")
+            Log.d("BRO_GROQ", "Sending prompt to On-Device Model (${com.example.bro.agent.OnDeviceLlmManager.loadedModelName}) on Dispatchers.IO...")
             try {
-                val result = com.example.bro.agent.OnDeviceLlmManager.generateResponse(systemPrompt, userPrompt)
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.example.bro.agent.OnDeviceLlmManager.generateResponse(systemPrompt, userPrompt)
+                }
                 if (result.isBlank()) {
                     throw Exception("On-device model returned empty response")
                 }

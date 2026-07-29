@@ -7,6 +7,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
@@ -107,6 +108,19 @@ fun BroApp() {
         )
     }
 
+    var providerMode by remember {
+        mutableStateOf(prefs.getString("provider_mode", "GROQ") ?: "GROQ")
+    }
+    var localPcUrl by remember {
+        mutableStateOf(prefs.getString("local_pc_url", "http://192.168.1.35:1234/v1/") ?: "http://192.168.1.35:1234/v1/")
+    }
+    var localModelName by remember {
+        mutableStateOf(prefs.getString("local_model_name", "local-model") ?: "local-model")
+    }
+    var customModelDirPath by remember {
+        mutableStateOf(prefs.getString("on_device_model_dir", "/sdcard/Download/") ?: "/sdcard/Download/")
+    }
+
     // Auto-scroll chat list to bottom when new messages arrive
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -122,26 +136,16 @@ fun BroApp() {
         } else {
             true
         }
-    }
-
-    var providerMode by remember {
-        mutableStateOf(prefs.getString("provider_mode", "GROQ") ?: "GROQ")
-    }
-    var localPcUrl by remember {
-        mutableStateOf(prefs.getString("local_pc_url", "http://192.168.1.35:1234/v1/") ?: "http://192.168.1.35:1234/v1/")
-    }
-    var localModelName by remember {
-        mutableStateOf(prefs.getString("local_model_name", "local-model") ?: "local-model")
-    }
-    var customModelDirPath by remember {
-        mutableStateOf(prefs.getString("on_device_model_dir", "/sdcard/Download/") ?: "/sdcard/Download/")
+        // Init on-device model ONCE on startup - NOT in Composable body to avoid recompose loops
+        com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = customModelDirPath
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            com.example.bro.agent.OnDeviceLlmManager.init(context)
+        }
     }
 
     com.example.bro.network.GroqRepository.providerMode = providerMode
     com.example.bro.network.GroqRepository.localPcUrl = localPcUrl
     com.example.bro.network.GroqRepository.localModelName = localModelName
-    com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = customModelDirPath
-    com.example.bro.agent.OnDeviceLlmManager.init(context)
 
     // Pulsing Animation for BRO Core Orb
     val infiniteTransition = rememberInfiniteTransition(label = "broGlow")
@@ -224,8 +228,9 @@ fun BroApp() {
                 )
             } catch (e: CancellationException) {
                 Log.d("BRO_MAIN", "Goal cancelled by user")
-            } catch (e: Exception) {
-                messages.add(Message("❌ Error: ${e.message}", false))
+            } catch (e: Throwable) {
+                Log.e("BRO_MAIN", "Task execution error: ${e.message}", e)
+                messages.add(Message("❌ Error: ${e.message ?: "Task execution failed"}", false))
             } finally {
                 isRunningTask = false
                 feedbackGoal = resolvedGoal
@@ -869,15 +874,36 @@ fun BroApp() {
                             } else if (providerMode == "ON_DEVICE") {
                                 var onDeviceStatus by remember { mutableStateOf(
                                     if (com.example.bro.agent.OnDeviceLlmManager.isModelLoaded)
-                                        "✅ Loaded: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelName}"
+                                        "✅ Loaded: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelName}\nPath: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelPath}"
                                     else "⚪ No model loaded"
                                 ) }
                                 var isLoadingModel by remember { mutableStateOf(false) }
-                                var selectedModelFile by remember { mutableStateOf("") }
+                                var directFilePathInput by remember { mutableStateOf("") }
 
                                 Text("📱 On-Device Model (Zero Network)", fontWeight = FontWeight.Bold, fontSize = 13.sp, color = JarvisCyan)
                                 Spacer(modifier = Modifier.height(4.dp))
-                                Text("Model Folder Path:", fontSize = 11.sp, color = JarvisTextPrimary)
+
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            try {
+                                                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                                    data = Uri.parse("package:" + context.packageName)
+                                                }
+                                                context.startActivity(intent)
+                                            } catch (e: Exception) {
+                                                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                                context.startActivity(intent)
+                                            }
+                                        },
+                                        border = BorderStroke(1.dp, Color(0xFFF59E0B)),
+                                        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+                                    ) {
+                                        Text("📂 Grant Storage Permission (All Files Access)", fontSize = 10.sp, color = Color(0xFFF59E0B), fontWeight = FontWeight.Bold)
+                                    }
+                                }
+
+                                Text("Model Directory or Direct File Path:", fontSize = 11.sp, color = JarvisTextPrimary)
                                 OutlinedTextField(
                                     value = customModelDirPath,
                                     onValueChange = {
@@ -885,7 +911,7 @@ fun BroApp() {
                                         com.example.bro.agent.OnDeviceLlmManager.customModelDirPath = it
                                         prefs.edit().putString("on_device_model_dir", it).apply()
                                     },
-                                    placeholder = { Text("/sdcard/Download/", color = JarvisTextSecondary) },
+                                    placeholder = { Text("/sdcard/Download/ or /sdcard/BRO/literlm.gguf", color = JarvisTextSecondary) },
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = OutlinedTextFieldDefaults.colors(
                                         focusedBorderColor = JarvisCyan,
@@ -896,7 +922,54 @@ fun BroApp() {
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
 
-                                // Status
+                                // Direct File Path Load Action
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    OutlinedTextField(
+                                        value = directFilePathInput,
+                                        onValueChange = { directFilePathInput = it },
+                                        placeholder = { Text("Paste exact file path (e.g. /sdcard/Download/literlm.gguf)", fontSize = 10.sp, color = JarvisTextSecondary) },
+                                        modifier = Modifier.weight(1f),
+                                        colors = OutlinedTextFieldDefaults.colors(
+                                            focusedBorderColor = JarvisCyan,
+                                            unfocusedBorderColor = Color(0x4400E5FF),
+                                            focusedTextColor = JarvisTextPrimary,
+                                            unfocusedTextColor = JarvisTextPrimary
+                                        )
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Button(
+                                        onClick = {
+                                            if (directFilePathInput.isNotBlank()) {
+                                                isLoadingModel = true
+                                                onDeviceStatus = "⏳ Loading ${directFilePathInput.trim()}..."
+                                                scope.launch {
+                                                    val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                                        com.example.bro.agent.OnDeviceLlmManager.loadModel(context, directFilePathInput.trim())
+                                                    }
+                                                    isLoadingModel = false
+                                                    result.onSuccess { msg ->
+                                                        onDeviceStatus = "✅ $msg\nPath: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelPath}"
+                                                    }
+                                                    result.onFailure { err ->
+                                                        onDeviceStatus = "❌ ${err.message}"
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        enabled = !isLoadingModel && directFilePathInput.isNotBlank(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = JarvisCyan),
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(38.dp)
+                                    ) {
+                                        Text("Load File", fontSize = 10.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                // Status Box
                                 Surface(
                                     color = if (com.example.bro.agent.OnDeviceLlmManager.isModelLoaded) Color(0xFF0A2E1A) else Color(0xFF1A1A2E),
                                     shape = RoundedCornerShape(8.dp),
@@ -911,36 +984,46 @@ fun BroApp() {
                                 }
                                 Spacer(modifier = Modifier.height(6.dp))
 
-                                // Available models
+                                // Available models list
                                 val availableModels = com.example.bro.agent.OnDeviceLlmManager.listAvailableModels(context)
                                 if (availableModels.isEmpty()) {
-                                    Text("⚠️ No model files found. Copy a .task file to the path above.", fontSize = 10.sp, color = Color(0xFFF59E0B))
+                                    Text("⚠️ No model files found in search paths. Enter a direct file path above or copy a model (.onnx, .task, .gguf, .bin) to /sdcard/Download/ or /sdcard/BRO/.", fontSize = 10.sp, color = Color(0xFFF59E0B))
                                 } else {
-                                    Text("Available Models:", fontSize = 11.sp, color = JarvisTextPrimary)
-                                    availableModels.forEach { modelFile ->
+                                    Text("Discovered Model Files (${availableModels.size}):", fontSize = 11.sp, color = JarvisTextPrimary)
+                                    availableModels.forEach { modelInfo ->
+                                        val isLoaded = modelInfo.absolutePath == com.example.bro.agent.OnDeviceLlmManager.loadedModelPath ||
+                                                modelInfo.fileName == com.example.bro.agent.OnDeviceLlmManager.loadedModelName
                                         Row(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.SpaceBetween
                                         ) {
-                                            Text(
-                                                modelFile,
-                                                fontSize = 10.sp,
-                                                color = if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) Color(0xFF10B981) else Color.White,
-                                                modifier = Modifier.weight(1f)
-                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    modelInfo.fileName,
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isLoaded) Color(0xFF10B981) else Color.White
+                                                )
+                                                Text(
+                                                    "${modelInfo.absolutePath} (${modelInfo.sizeBytes / 1024} KB)",
+                                                    fontSize = 9.sp,
+                                                    color = JarvisTextSecondary,
+                                                    fontFamily = FontFamily.Monospace
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(6.dp))
                                             Button(
                                                 onClick = {
-                                                    selectedModelFile = modelFile
                                                     isLoadingModel = true
-                                                    onDeviceStatus = "⏳ Loading $modelFile..."
+                                                    onDeviceStatus = "⏳ Loading ${modelInfo.fileName}..."
                                                     scope.launch {
                                                         val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                                            com.example.bro.agent.OnDeviceLlmManager.loadModel(context, modelFile)
+                                                            com.example.bro.agent.OnDeviceLlmManager.loadModel(context, modelInfo.absolutePath)
                                                         }
                                                         isLoadingModel = false
                                                         result.onSuccess { msg ->
-                                                            onDeviceStatus = "✅ $msg"
+                                                            onDeviceStatus = "✅ $msg\nPath: ${com.example.bro.agent.OnDeviceLlmManager.loadedModelPath}"
                                                         }
                                                         result.onFailure { err ->
                                                             onDeviceStatus = "❌ ${err.message}"
@@ -949,13 +1032,13 @@ fun BroApp() {
                                                 },
                                                 enabled = !isLoadingModel,
                                                 colors = ButtonDefaults.buttonColors(
-                                                    containerColor = if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) Color(0xFF10B981) else JarvisCyan
+                                                    containerColor = if (isLoaded) Color(0xFF10B981) else JarvisCyan
                                                 ),
                                                 modifier = Modifier.height(28.dp),
-                                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                                             ) {
                                                 Text(
-                                                    if (modelFile == com.example.bro.agent.OnDeviceLlmManager.loadedModelName) "Loaded" else "Load",
+                                                    if (isLoaded) "Loaded" else "Load",
                                                     fontSize = 9.sp,
                                                     color = Color.Black,
                                                     fontWeight = FontWeight.Bold
