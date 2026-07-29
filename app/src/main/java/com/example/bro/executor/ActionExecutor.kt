@@ -374,6 +374,15 @@ class ActionExecutor(
     }
 
     private fun scroll(direction: String?): Boolean {
+        // Guard: If we're on the notification shade / system UI, press BACK to dismiss it and abort scroll
+        val activePkgNow = service.rootInActiveWindow?.packageName?.toString()
+        if (activePkgNow == "com.android.systemui") {
+            Log.w("BRO_EXECUTOR", "Detected notification shade open! Pressing BACK to close it.")
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            try { Thread.sleep(800) } catch (e: Exception) {}
+            return true
+        }
+
         val isDown = direction?.equals("DOWN", ignoreCase = true) ?: true
         val root = service.rootInActiveWindow ?: return false
 
@@ -393,8 +402,11 @@ class ActionExecutor(
             val height = displayMetrics.heightPixels
 
             val startX = (width / 2).toFloat()
-            val startY = if (isDown) (height * 0.75f) else (height * 0.25f)
-            val endY = if (isDown) (height * 0.25f) else (height * 0.75f)
+            // Safe bounds: keep swipe gesture away from the very top of screen
+            // to avoid accidentally triggering the notification shade pull-down
+            val safeTopBound = height * 0.35f
+            val startY = if (isDown) (height * 0.70f) else safeTopBound
+            val endY = if (isDown) safeTopBound else (height * 0.70f)
 
             val path = Path().apply {
                 moveTo(startX, startY)
@@ -408,6 +420,7 @@ class ActionExecutor(
 
         return false
     }
+
 
     private fun findScrollableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         if (node == null) return null

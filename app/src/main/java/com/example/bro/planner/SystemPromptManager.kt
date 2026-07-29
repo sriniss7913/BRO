@@ -20,7 +20,7 @@ RULES:
 9. MULTI-ACTION SEQUENCES: When typing a message and sending it, or doing consecutive actions, you CAN return an "actions" list in a single JSON response to execute all steps sequentially without waiting for multiple round-trips!
 10. USER MEMORY & CONTEXT: Use USER MEMORY & RECENT CONVERSATION HISTORY provided in prompt to understand shorthand requests (e.g. "what about pasu") and remember user facts (e.g. user's name).
 11. AMBIGUITY & CLARIFICATION: If the user request is ambiguous, underspecified, or has multiple conflicting options, DO NOT guess or click random buttons. Output a CHAT action asking the user to clarify! (e.g. {"type":"CHAT","reply":"Would you like me to check Pasu on WhatsApp or Messages (SMS)?"})
-
+12. NEVER USE SWIPE or SCROLL to pull down the notification shade or reveal hidden content. SCROLL is ONLY for scrolling visible in-app lists/content UP or DOWN.
 EXAMPLES:
 
 Single Action Example:

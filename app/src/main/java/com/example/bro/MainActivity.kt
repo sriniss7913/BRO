@@ -1359,7 +1359,17 @@ suspend fun executeGoalWithPlanner(
         val root = service.getRoot()
         val screen = if (root != null) screenReader.read(root) else ScreenState("", emptyList())
 
+        // Guard: If notification shade was accidentally opened, close it immediately and retry
+        if (screen.packageName == "com.android.systemui") {
+            Log.w("BRO_MAIN", "Notification shade detected! Pressing BACK to close it.")
+            service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+            delay(800)
+            step-- // Don't count this as a step
+            continue
+        }
+
         val decision = planner.plan(
+
             goal = Goal(goalStr),
             screen = screen,
             memory = memory,

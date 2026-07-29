@@ -95,6 +95,7 @@ Respond with ONE JSON action only. No explanation. No extra text.
             "INPUT", "ENTER_TEXT", "WRITE" -> "TYPE"
             "COMPLETE", "DONE" -> "FINISH"
             "READ", "REPLY", "INSPECT", "SUMMARY", "INFO", "CHECK" -> "FINISH"
+            "SWIPE" -> "SCROLL"  // Remap SWIPE → SCROLL to prevent physical swipe-down opening notification shade
             else -> rawType
         }
 
