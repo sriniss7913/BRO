@@ -159,12 +159,12 @@ class ScreenReader {
                     value == "back"
         }
 
-        if (isInsideChat) {
+        val isWhatsAppMainList = isWhatsApp && !isInsideChat
 
+        if (isInsideChat) {
             builder.append(
                 "STATUS: INSIDE WHATSAPP CHAT.\n"
             )
-
             builder.append(
                 "Choose actions only from CURRENT SCREEN elements. " +
                         "TYPE requires an editable input element. " +
@@ -172,7 +172,17 @@ class ScreenReader {
             )
         }
 
+        if (isWhatsAppMainList) {
+            builder.append(
+                "STATUS: ON WHATSAPP MAIN CHATS SCREEN.\n" +
+                "IMPORTANT: To find a contact not visible in the list, you MUST use the Search element.\n" +
+                "Look for element with text 'Search' or contentDescription 'Search' and CLICK it first.\n" +
+                "Then TYPE the contact name. DO NOT give up with CHAT if the contact is not visible — SEARCH first!\n\n"
+            )
+        }
+
         builder.append("Screen Elements:\n")
+
 
         val emittedIds = mutableSetOf<Int>()
         val seenTexts = mutableSetOf<String>()
@@ -193,6 +203,18 @@ class ScreenReader {
                 ) ||
                 displayText.contains(
                     "notifications",
+                    ignoreCase = true
+                ) ||
+                displayText.contains(
+                    "Swipe down to reveal",
+                    ignoreCase = true
+                ) ||
+                displayText.contains(
+                    "Inbox filters",
+                    ignoreCase = true
+                ) ||
+                displayText.contains(
+                    "Radio Group",
                     ignoreCase = true
                 )
             ) {

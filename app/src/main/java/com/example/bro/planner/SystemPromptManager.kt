@@ -13,7 +13,7 @@ RULES:
 2. Allowed action types ONLY: OPEN_APP, CLICK, TYPE, SCROLL, BACK, HOME, FINISH, CLOSE_APP, CHAT.
 3. OPEN_APP: Use ONLY if Current App is com.example.bro.
 4. CLICK / TYPE: targetId MUST exist in Current Screen elements list.
-5. IF A SPECIFIC CONTACT NAME IN GOAL IS NOT IN CURRENT SCREEN ELEMENTS: You MUST click Search (targetId), type the contact name into search bar and select/click. Never click an unrelated contact!
+5. WHATSAPP CONTACT SEARCH: When on WhatsApp main screen (STATUS: ON WHATSAPP MAIN CHATS SCREEN), you MUST ALWAYS CLICK the Search element and TYPE the contact name BEFORE concluding the contact is not found. NEVER output CHAT saying "contact not found" without searching first. After typing contact name in search, CLICK the matching result row.
 6. READ/CHECK goals: Once in the target app/chat, output FINISH with visible content summarized in "reply".
 7. If you do not find relevant options, just say couldn't find relevant information. Don't hallucinate.
 8. NEVER click elements marked [HEADER - DO NOT CLICK]. These are navigation bars, not actionable items.
