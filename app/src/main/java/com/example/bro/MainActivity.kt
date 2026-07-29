@@ -21,7 +21,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -169,13 +168,6 @@ fun BroApp() {
         label = "orbAlpha"
     )
 
-    val quickActionPresets = listOf(
-        "💬 Send hi to Ramesh on WhatsApp",
-        "🎵 Open YouTube",
-        "🌐 Open Chrome",
-        "⚙️ Open Settings",
-        "📱 Inspect current screen"
-    )
 
     var showFeedbackDialog by remember { mutableStateOf(false) }
     var feedbackGoal by remember { mutableStateOf("") }
@@ -436,32 +428,6 @@ fun BroApp() {
                 }
             }
 
-            // Quick Preset Command Chips Row
-            LazyRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(quickActionPresets) { preset ->
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0x770D182E),
-                        border = BorderStroke(1.dp, Color(0x3300E5FF)),
-                        modifier = Modifier.clickable {
-                            input = preset.substringAfter(" ")
-                        }
-                    ) {
-                        Text(
-                            text = preset,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            fontSize = 11.sp,
-                            color = JarvisCyan,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-                }
-            }
 
             // Chat Messages List with Glassmorphism Bubbles & Quick Copy
             LazyColumn(
@@ -1227,7 +1193,11 @@ fun openApp(context: Context, appName: String?) {
         Toast.makeText(context, "Cannot launch '$appName'", Toast.LENGTH_SHORT).show()
         return
     }
-    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    // Launch to the app's main screen, clearing any task stack so it always starts fresh
+    intent.addFlags(
+        Intent.FLAG_ACTIVITY_NEW_TASK or
+        Intent.FLAG_ACTIVITY_CLEAR_TOP
+    )
     context.startActivity(intent)
 }
 

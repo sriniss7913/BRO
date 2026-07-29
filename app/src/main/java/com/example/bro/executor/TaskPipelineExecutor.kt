@@ -74,37 +74,52 @@ object TaskPipelineExecutor {
         val service = BroAccessibilityService.instance ?: return false
 
         val (contactName, messageText) = parseWhatsAppParams(goalStr)
-        messages.add(Message("⚡ B.R.O. Direct Pipeline: Opening WhatsApp for $contactName...", false))
+        messages.add(Message("⚡ B.R.O.: Opening WhatsApp for $contactName...", false))
 
+        // Launch WhatsApp to its main screen (clear any sub-screen)
         launchApp(context, "WhatsApp")
-        delay(2000)
+        delay(2500)
 
         val root = service.getRoot() ?: return false
+
+        // Always search for the contact via the search bar — never rely on main screen visibility
+        messages.add(Message("🔍 Searching for '$contactName'...", false))
         val searchNode = findSearchNode(root)
+
         if (searchNode != null) {
-            messages.add(Message("🔍 Searching for '$contactName'...", false))
-            val isSearchClickable = searchNode.isClickable || searchNode.parent?.isClickable == true
             val target = if (searchNode.isClickable) searchNode else searchNode.parent
             target?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
             delay(1000)
 
-            val updatedRoot = service.getRoot() ?: return false
-            val inputNode = findFirstEditableOrClickableInput(updatedRoot) ?: searchNode
+            val searchRoot = service.getRoot() ?: return false
+            val inputNode = findFirstEditableOrClickableInput(searchRoot) ?: searchNode
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, contactName)
             }
             inputNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            delay(1500)
+            delay(1800)
 
-            val activePkg = service.rootInActiveWindow?.packageName?.toString()
-            if (activePkg == "com.whatsapp") {
-                val searchResultRoot = service.getRoot() ?: updatedRoot
-                clickContactRow(searchResultRoot, contactName)
+            // Tap the matching contact in search results
+            val resultRoot = service.getRoot() ?: searchRoot
+            val clicked = clickContactRow(resultRoot, contactName)
+            if (!clicked) {
+                // Fallback: tap first result row
+                clickFirstResultRow(resultRoot)
+            }
+            delay(1500)
+        } else {
+            messages.add(Message("⚠️ Could not find WhatsApp search bar. Trying to find contact on screen...", false))
+            val mainRoot = service.getRoot() ?: return false
+            val clicked = clickContactRow(mainRoot, contactName)
+            if (!clicked) {
+                messages.add(Message("❌ Contact '$contactName' not found on WhatsApp.", false))
+                returnToBroApp(context)
+                return false
             }
             delay(1500)
         }
 
-        // Locate Chat Input Field & Type Message
+        // Now inside the chat — type message and send
         val inChatRoot = service.getRoot() ?: root
         val chatInputNode = findChatInputNode(inChatRoot)
         if (chatInputNode != null) {
@@ -113,23 +128,29 @@ object TaskPipelineExecutor {
             val arguments = Bundle()
             arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, messageText)
             chatInputNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-            delay(1000)
+            delay(800)
 
-            // Click Send Button
+            // Find and click the send button
             val sendRoot = service.getRoot() ?: inChatRoot
             val sendBtn = findSendButton(sendRoot)
             if (sendBtn != null) {
                 sendBtn.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                messages.add(Message("✅ Sent '$messageText' to $contactName on WhatsApp!", false))
+                delay(500)
+                messages.add(Message("✅ Sent \"$messageText\" to $contactName on WhatsApp!", false))
                 returnToBroApp(context)
                 return true
+            } else {
+                messages.add(Message("❌ Could not find Send button. Message typed but not sent.", false))
+                returnToBroApp(context)
+                return false
             }
+        } else {
+            messages.add(Message("❌ Opened chat for '$contactName' but could not find message input.", false))
+            returnToBroApp(context)
+            return false
         }
-
-        messages.add(Message("✅ Completed WhatsApp navigation for $contactName.", false))
-        returnToBroApp(context)
-        return true
     }
+
 
     private suspend fun executeWhatsAppRead(
         context: Context,
