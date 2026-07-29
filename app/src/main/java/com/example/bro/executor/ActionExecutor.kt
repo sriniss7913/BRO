@@ -311,6 +311,14 @@ class ActionExecutor(
         if (node.isEditable) return -1
 
         val text = extractAggregateText(node) ?: return -1
+
+        // CRITICAL: Reject "Ask Meta" / "Meta AI" rows so we click the actual contact name, NOT Meta AI!
+        if (text.contains("ask meta", ignoreCase = true) ||
+            text.contains("meta ai", ignoreCase = true) ||
+            text.contains("send message to meta", ignoreCase = true)) {
+            return -1
+        }
+
         if (!text.contains(searchText, ignoreCase = true)) return -1
 
         var score = 0

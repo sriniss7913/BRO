@@ -367,11 +367,17 @@ object TaskPipelineExecutor {
     }
 
     private fun findSearchNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        val nodes = root.findAccessibilityNodeInfosByText("Search")
-        if (nodes.isNotEmpty()) return nodes.firstOrNull { it.isClickable || it.isEditable || it.parent?.isClickable == true }
+        val searchOrMetaNodes = root.findAccessibilityNodeInfosByText("Ask Meta or Search")
+        if (searchOrMetaNodes.isNotEmpty()) return searchOrMetaNodes.firstOrNull { it.isClickable || it.isEditable || it.parent?.isClickable == true }
 
-        val metaNodes = root.findAccessibilityNodeInfosByText("Ask Meta AI")
-        if (metaNodes.isNotEmpty()) return metaNodes.firstOrNull()
+        val searchOrMetaAiNodes = root.findAccessibilityNodeInfosByText("Ask Meta AI or Search")
+        if (searchOrMetaAiNodes.isNotEmpty()) return searchOrMetaAiNodes.firstOrNull { it.isClickable || it.isEditable || it.parent?.isClickable == true }
+
+        val searchNodes = root.findAccessibilityNodeInfosByText("Search")
+        if (searchNodes.isNotEmpty()) return searchNodes.firstOrNull { it.isClickable || it.isEditable || it.parent?.isClickable == true }
+
+        val askMetaNodes = root.findAccessibilityNodeInfosByText("Ask Meta")
+        if (askMetaNodes.isNotEmpty()) return askMetaNodes.firstOrNull { it.isClickable || it.isEditable || it.parent?.isClickable == true }
 
         return findFirstEditableOrClickableInput(root)
     }
@@ -413,7 +419,6 @@ object TaskPipelineExecutor {
         val rect = Rect()
         best.getBoundsInScreen(rect)
         if (rect.width() > 400 && rect.height() in 60..350) {
-            // Prefer gesture tap on right side to avoid avatar
             return best.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
         return best.performAction(AccessibilityNodeInfo.ACTION_CLICK)
@@ -426,6 +431,14 @@ object TaskPipelineExecutor {
         val text = node.text?.toString()?.trim()
             ?: node.contentDescription?.toString()?.trim()
             ?: return -1
+
+        // CRITICAL: Reject "Ask Meta" / "Meta AI" rows so we click the actual contact name, NOT Meta AI!
+        if (text.contains("ask meta", ignoreCase = true) ||
+            text.contains("meta ai", ignoreCase = true) ||
+            text.contains("send message to meta", ignoreCase = true)) {
+            return -1
+        }
+
         if (!text.contains(contactName, ignoreCase = true)) return -1
 
         var score = 0
@@ -440,12 +453,20 @@ object TaskPipelineExecutor {
     }
 
     private fun clickFirstResultRow(root: AccessibilityNodeInfo): Boolean {
-        for (i in 0 until root.childCount) {
-            val child = root.getChild(i) ?: continue
-            if (child.isClickable && !child.className?.toString().orEmpty().contains("ImageView", ignoreCase = true)) {
-                child.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                return true
-            }
+        return findAndClickContactResult(root)
+    }
+
+    private fun findAndClickContactResult(node: AccessibilityNodeInfo): Boolean {
+        val text = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+        val isMetaAi = text != null && (text.contains("ask meta", ignoreCase = true) || text.contains("meta ai", ignoreCase = true))
+        val isSearch = text != null && text.contains("search", ignoreCase = true)
+
+        if (node.isClickable && !isMetaAi && !isSearch && !node.className?.toString().orEmpty().contains("ImageView", ignoreCase = true) && !node.isEditable) {
+            return node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            if (findAndClickContactResult(child)) return true
         }
         return false
     }

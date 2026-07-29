@@ -151,6 +151,7 @@ class ScreenReader {
                     value == "message" ||
 
                     value.contains("search") ||
+                    value.contains("ask meta") ||
 
                     value.contains("attach") ||
                     value.contains("camera") ||
@@ -373,9 +374,11 @@ class ScreenReader {
 
     private fun isMetaAiCategoryChip(text: String): Boolean {
         val normalized = text.trim().lowercase()
-        return normalized.contains("meta ai") ||
-            normalized.contains("ask meta") ||
-            normalized.contains("send message to meta ai") ||
+        // CRITICAL: Never filter out the Search bar or search fields, even if labeled 'Ask Meta or Search' or 'Ask Meta AI or Search'
+        if (normalized.contains("search") || normalized.contains("ask meta or search") || normalized.contains("ask meta ai or search")) {
+            return false
+        }
+        return normalized.contains("send message to meta ai") ||
             normalized in META_AI_CHIPS
     }
 
