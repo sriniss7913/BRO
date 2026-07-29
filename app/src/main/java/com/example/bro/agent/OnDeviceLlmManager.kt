@@ -227,7 +227,7 @@ object OnDeviceLlmManager {
             try {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(targetFile.absolutePath)
-                    .setMaxTokens(1024)
+                    .setMaxTokens(512)
                     .build()
 
                 llmInference = LlmInference.createFromOptions(context, options)
@@ -246,7 +246,7 @@ object OnDeviceLlmManager {
             try {
                 val options = LlmInference.LlmInferenceOptions.builder()
                     .setModelPath(targetFile.absolutePath)
-                    .setMaxTokens(1024)
+                    .setMaxTokens(512)
                     .build()
 
                 llmInference = LlmInference.createFromOptions(context, options)
@@ -297,15 +297,15 @@ object OnDeviceLlmManager {
         // 2. MediaPipe LlmInference engine
         val inference = llmInference
         if (inference != null) {
-            val safeUserPrompt = if (userPrompt.length > 2500) {
-                userPrompt.take(2500) + "\n...[truncated for on-device memory]"
+            val safeUserPrompt = if (userPrompt.length > 1200) {
+                userPrompt.take(1200) + "\n...[truncated for on-device memory]"
             } else {
                 userPrompt
             }
 
             val combinedPrompt = buildString {
                 append("<start_of_turn>user\n")
-                append(systemPrompt.take(1500))
+                append(systemPrompt.take(800))
                 append("\n\n")
                 append(safeUserPrompt)
                 append("<end_of_turn>\n")
