@@ -28,16 +28,19 @@ class GroqPlanner(
     ): PlannerResponse {
         val systemPrompt = if (context != null) SystemPromptManager.getSystemPrompt(context) else SystemPromptManager.DEFAULT_SYSTEM_PROMPT
 
-        val memoryContext = if (context != null) com.example.bro.agent.UserConversationMemory.buildMemoryPromptContext(context) else ""
+        // val memoryContext = if (context != null) com.example.bro.agent.UserConversationMemory.buildMemoryPromptContext(context) else ""
         val screenPrompt = buildScreenPrompt(screen, memory)
 
         val userPrompt = """
-${if (memoryContext.isNotBlank()) memoryContext else ""}GOAL: ${goal.request}
-
-$screenPrompt
-
-Respond with ONE JSON action only. No explanation. No extra text.
-        """.trimIndent()
+        GOAL:
+        ${goal.request}
+        
+        CURRENT APP:
+        ${screen.packageName}
+        
+        CURRENT SCREEN:
+        $screenPrompt
+                """.trimIndent()
 
         Log.d("GROQ_PLANNER", "Sending prompt to Groq API...")
 
@@ -247,29 +250,6 @@ Respond with ONE JSON action only. No explanation. No extra text.
                 appendLine("⚠️ SEARCH BAR IS OPEN: Type the target contact/item name into the [CHAT INPUT BOX - TYPE HERE] element now. DO NOT click contacts below until searched!\n")
             }
             append(processedPrompt)
-            if (memory.previousActions.isNotEmpty()) {
-                appendLine("History:")
-                memory.previousActions.takeLast(2).forEach { prev ->
-                    append("- ${prev.type}")
-                    prev.targetId?.let { id ->
-                        // Look up what element text was at that ID for semantic context
-                        val node = com.example.bro.accessibility.NodeRepository.get(id)
-                        val nodeText = node?.text?.toString()?.take(30)
-                            ?: node?.contentDescription?.toString()?.take(30)
-                        if (nodeText != null) {
-                            append(" \"$nodeText\"")
-                        } else {
-                            append(" id=$id")
-                        }
-                    }
-                    prev.text?.let { append(" text=\"$it\"") }
-                    // Add semantic hint for contact selection
-                    if (prev.type == ActionType.CLICK && prev.summary?.contains("chat", ignoreCase = true) == true) {
-                        append(" → ENTERED CHAT")
-                    }
-                    appendLine()
-                }
-            }
         }
     }
 }

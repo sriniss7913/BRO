@@ -6,8 +6,12 @@ Usage:
   python scripts/train_whatsapp_slm.py --model HuggingFaceTB/SmolLM2-135M-Instruct --epochs 3
 """
 
-import argparse
 import os
+os.environ["USE_TORCH"] = "1"
+os.environ["USE_TF"] = "0"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+import argparse
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, DataCollatorForLanguageModeling, Trainer

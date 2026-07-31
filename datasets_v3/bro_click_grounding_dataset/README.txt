@@ -1,0 +1,1 @@
+Supplement existing V3 train with 1800 grounding examples. Keep the existing 330 V3 test untouched. Train a fresh adapter from the base model, then benchmark on the untouched V3 test.
