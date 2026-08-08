@@ -7,12 +7,13 @@ import com.example.bro.model.UiElement
 class ScreenReader {
 
     fun read(root: AccessibilityNodeInfo?): ScreenState {
-        NodeRepository.clear()
+        // Build flat UiElement list for ScreenState metadata
         val nodes = mutableListOf<UiElement>()
         traverse(root, nodes)
         return ScreenState(
             packageName = root?.packageName?.toString() ?: "",
-            nodes = nodes
+            nodes = nodes,
+            rawRoot = root   // carry the live root so toPrompt() can use it anywhere
         )
     }
 
@@ -34,7 +35,6 @@ class ScreenReader {
 
         if (isUseful) {
             val id = list.size
-            NodeRepository.put(id, node)
             list.add(
                 UiElement(
                     id = id,
@@ -77,338 +77,16 @@ class ScreenReader {
     }
 
     /**
-     * Builds the screen context string sent to the LLM planner.
-     * Element IDs are preserved so NodeRepository stays in sync with click targets.
+     * Build hierarchical tree prompt. Uses rawRoot stored in ScreenState.
      */
     fun toPrompt(screen: ScreenState): String {
-
-        // BRO's own UI is irrelevant to external-app planning.
-        if (
-            screen.packageName == "com.example.bro" ||
-            screen.packageName.endsWith(".bro")
-        ) {
-            return "Current App: com.example.bro (BRO Main Screen)\n"
-        }
-
-        val builder = StringBuilder()
-
-        builder.append("Current App: ${screen.packageName}\n\n")
-
-        if (screen.nodes.isEmpty()) {
-            builder.append("Screen Elements:\n(empty screen)\n")
-            return builder.toString()
-        }
-
-        val isWhatsApp = screen.packageName == "com.whatsapp"
-
-        fun label(element: UiElement): String {
-            return element.text?.trim()
-                .orEmpty()
-                .ifBlank {
-                    element.contentDescription?.trim().orEmpty()
-                }
-        }
-
-        /*
-         * Detect WhatsApp chat.
-         */
-        val hasBackButton = screen.nodes.any {
-            label(it).equals("Back", ignoreCase = true)
-        }
-
-        val hasChatIndicators = screen.nodes.any {
-            val value = label(it).lowercase()
-
-            it.editable ||
-                    value == "message" ||
-                    value.contains("type a message") ||
-                    value.contains("video call") ||
-                    value.contains("voice call") ||
-                    value.contains("end-to-end")
-        }
-
-        val isInsideChat =
-            isWhatsApp &&
-                    hasBackButton &&
-                    hasChatIndicators
-
-        val isWhatsAppArchived =
-            isWhatsApp &&
-                    hasBackButton &&
-                    !hasChatIndicators &&
-                    screen.nodes.any {
-                        val value = label(it).lowercase()
-                        value == "archived" || value.contains("these chats stay archived")
-                    }
-
-        /*
-         * Find high-priority interactive elements.
-         *
-         * These MUST reach the planner even if there are
-         * hundreds of message-history nodes.
-         */
-        val priorityElements = screen.nodes.filter { element ->
-
-            val value = label(element).lowercase()
-
-            element.editable ||
-
-                    value == "send" ||
-                    value.contains("send message") ||
-
-                    value.contains("type a message") ||
-                    value == "message" ||
-
-                    value.contains("search") ||
-                    value.contains("ask meta") ||
-
-                    value.contains("attach") ||
-                    value.contains("camera") ||
-                    value.contains("emoji") ||
-
-                    value == "back"
-        }
-
-        val isWhatsAppMainList = isWhatsApp && !isInsideChat && !isWhatsAppArchived
-
-        if (isInsideChat) {
-            builder.append(
-                "STATUS: INSIDE WHATSAPP CHAT.\n"
-            )
-            builder.append(
-                "Choose actions only from CURRENT SCREEN elements. " +
-                        "TYPE requires an editable input element. " +
-                        "After typing, CLICK the Send element.\n\n"
-            )
-        } else if (isWhatsAppArchived) {
-            builder.append(
-                "STATUS: INSIDE WHATSAPP ARCHIVED CHATS SCREEN.\n" +
-                "IMPORTANT: You are currently inside the Archived Chats folder, NOT the main chats list.\n" +
-                "If you need to find or message a contact from the main list, CLICK the 'Back' element first!\n\n"
-            )
-        } else if (isWhatsAppMainList) {
-            builder.append(
-                "STATUS: ON WHATSAPP MAIN CHATS SCREEN.\n" +
-                "IMPORTANT: To find a contact not visible in the list, you MUST use the Search element.\n" +
-                "Look for element with text 'Search' or contentDescription 'Search' and CLICK it first.\n" +
-                "Then TYPE the contact name. DO NOT give up with CHAT if the contact is not visible — SEARCH first!\n\n"
-            )
-        }
-
-        builder.append("Screen Elements:\n")
-
-
-        val emittedIds = mutableSetOf<Int>()
-        val seenTexts = mutableSetOf<String>()
-
-        /*
-         * Helper for writing one element.
-         */
-        fun appendElement(element: UiElement) {
-
-            if (element.id in emittedIds) return
-
-            val displayText = label(element)
-
-            if (
-                displayText.contains(
-                    "Battery charging",
-                    ignoreCase = true
-                ) ||
-                displayText.contains(
-                    "notifications",
-                    ignoreCase = true
-                ) ||
-                displayText.contains(
-                    "Swipe down to reveal",
-                    ignoreCase = true
-                ) ||
-                displayText.contains(
-                    "Inbox filters",
-                    ignoreCase = true
-                ) ||
-                displayText.contains(
-                    "Radio Group",
-                    ignoreCase = true
-                )
-            ) {
-                return
-            }
-
-            if (
-                displayText.isNotBlank() &&
-                isMetaAiCategoryChip(displayText)
-            ) {
-                return
-            }
-
-            val useful =
-                displayText.isNotBlank() ||
-                        element.editable ||
-                        element.checkable ||
-                        (
-                                element.clickable &&
-                                        !isGenericEmptyContainer(element)
-                                )
-
-            if (!useful) return
-
-            /*
-             * Deduplicate ordinary text, but NEVER deduplicate
-             * interactive/editable elements.
-             */
-            val dedupKey =
-                displayText
-                    .take(50)
-                    .lowercase()
-
-            if (
-                !element.editable &&
-                !element.clickable &&
-                dedupKey.isNotBlank() &&
-                dedupKey in seenTexts
-            ) {
-                return
-            }
-
-            if (dedupKey.isNotBlank()) {
-                seenTexts.add(dedupKey)
-            }
-
-            builder.append("[${element.id}] ")
-
-            builder.append(
-                displayText
-                    .take(60)
-                    .ifBlank {
-                        (element.className ?: "Element")
-                            .substringAfterLast('.')
-                    }
-            )
-
-            when {
-
-                element.editable -> {
-                    builder.append(" [EDITABLE - TYPE HERE]")
-
-                    /*
-                     * Important:
-                     * node.text can contain the currently entered
-                     * message, so the planner can tell whether TYPE
-                     * already happened.
-                     */
-                    val currentText =
-                        element.text
-                            ?.trim()
-                            .orEmpty()
-
-                    if (currentText.isNotBlank()) {
-                        builder.append(
-                            " [CURRENT TEXT=\"${currentText.take(80)}\"]"
-                        )
-                    }
-                }
-
-                element.clickable -> {
-                    builder.append(" [CLICK]")
-                }
-            }
-
-            if (element.checkable) {
-
-                builder.append(" [CHK")
-
-                if (element.checked) {
-                    builder.append(":1")
-                }
-
-                builder.append("]")
-            }
-
-            if (!element.enabled) {
-                builder.append(" [OFF]")
-            }
-
-            builder.append('\n')
-
-            emittedIds.add(element.id)
-        }
-
-        /*
-         * PASS 1:
-         *
-         * Always send interactive controls first.
-         *
-         * This is the important fix.
-         */
-        priorityElements.forEach {
-            appendElement(it)
-        }
-
-        /*
-         * PASS 2:
-         *
-         * Then send useful normal elements for context.
-         */
-        val maxTotalElements = 40
-
-        for (element in screen.nodes) {
-
-            if (emittedIds.size >= maxTotalElements) {
-                break
-            }
-
-            /*
-             * Don't waste planner context on giant pieces of
-             * conversation history.
-             */
-            val displayText = label(element)
-
-            if (
-                displayText.length > 80 &&
-                !element.editable &&
-                !element.clickable
-            ) {
-                continue
-            }
-
-            appendElement(element)
-        }
-
-        if (screen.nodes.size > emittedIds.size) {
-
-            builder.append(
-                "...${screen.nodes.size - emittedIds.size} more elements omitted\n"
-            )
-        }
-
-        return builder.toString()
+        return UiCanonicalizer.canonicalize(screen.rawRoot, screen.packageName)
     }
 
-    private fun isMetaAiCategoryChip(text: String): Boolean {
-        val normalized = text.trim().lowercase()
-        // CRITICAL: Never filter out the Search bar or search fields, even if labeled 'Ask Meta or Search' or 'Ask Meta AI or Search'
-        if (normalized.contains("search") || normalized.contains("ask meta or search") || normalized.contains("ask meta ai or search")) {
-            return false
-        }
-        return normalized.contains("send message to meta ai") ||
-            normalized in META_AI_CHIPS
-    }
-
-    private fun isGenericEmptyContainer(element: UiElement): Boolean {
-        val cls = element.className.orEmpty()
-        val isLayout = cls.contains("Layout") ||
-            cls.contains("ViewGroup") ||
-            cls.contains("Frame")
-        return isLayout &&
-            element.text.isNullOrBlank() &&
-            element.contentDescription.isNullOrBlank()
-    }
-
-    companion object {
-        private val META_AI_CHIPS = setOf(
-            "photos", "videos", "audio", "documents", "links", "gifs",
-            "favorites", "ask", "meta ai", "unread"
-        )
+    /**
+     * Direct call with raw root — used by BroAccessibilityService for logcat logging.
+     */
+    fun toPrompt(root: AccessibilityNodeInfo?): String {
+        return UiCanonicalizer.canonicalize(root, root?.packageName?.toString() ?: "")
     }
 }

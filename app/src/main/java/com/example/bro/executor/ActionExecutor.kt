@@ -22,30 +22,10 @@ class ActionExecutor(
             "Executing type=${action.type}, targetId=${action.targetId}, text=${action.text}, target=${action.target}"
         )
 
-        // Auto-recovery: If we landed in WhatsApp Contact Profile / Photo screen accidentally, press BACK and skip this action
-        // Only trigger on keywords that EXCLUSIVELY appear on the Profile Info page
-        // (NOT "business account" which appears in normal chat headers for business contacts)
-        val activeRoot = service.rootInActiveWindow
-        if (activeRoot?.packageName?.toString() == "com.whatsapp") {
-            val fullText = mutableListOf<String>()
-            collectText(activeRoot, fullText)
-            val joined = fullText.joinToString(" ").lowercase()
-            val isProfileScreen = (joined.contains("disappearing messages") || joined.contains("chat lock") ||
-                joined.contains("media visibility")) &&
-                !joined.contains("type a message")
-            val isMetaAiScreen = (joined.contains("send message to meta ai") || joined.contains("back meta ai")) &&
-                !joined.contains("type a message")
-            if (isProfileScreen || isMetaAiScreen) {
-                Log.d("BRO_EXECUTOR", "Auto-escaping WhatsApp Profile / Meta AI screen — pressing BACK")
-                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                try { Thread.sleep(1000) } catch (e: Exception) {}
-                return true // Skip this bad action, let next LLM step see the chat screen
-            }
-        }
-
         val result = when (action.type) {
             ActionType.CLICK -> click(action)
             ActionType.TYPE -> type(action)
+            ActionType.SEARCH -> search(action)
             ActionType.SCROLL, ActionType.SWIPE -> scroll(action.text)
             ActionType.BACK -> back()
             ActionType.HOME -> home()
@@ -98,7 +78,6 @@ class ActionExecutor(
         return false
     }
 
-    /** Walk up from ImageView / tiny nodes to the actual clickable row. */
     private fun resolveClickTarget(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
         val cls = node.className?.toString().orEmpty()
         if (!cls.contains("ImageView", ignoreCase = true) &&
@@ -133,7 +112,6 @@ class ActionExecutor(
 
         val rect = Rect()
         startNode.getBoundsInScreen(rect)
-        // Guard: reject taps with negative, zero, or off-screen coordinates
         if (rect.width() > 0 && rect.height() > 0 && rect.left >= 0 && rect.top >= 0) {
             val centerX = rect.centerX().toFloat()
             val centerY = rect.centerY().toFloat()
@@ -146,13 +124,11 @@ class ActionExecutor(
         return false
     }
 
-    /** Tap the right side of wide rows to avoid WhatsApp profile-picture avatars on the left. */
     private fun clickContactRowAvoidingAvatar(node: AccessibilityNodeInfo): Boolean {
         var targetNode = node
         val rect = Rect()
         targetNode.getBoundsInScreen(rect)
 
-        // Walk up parents if targetNode is narrow (e.g. avatar image or child text node)
         if (rect.width() <= 400) {
             var parent = node.parent
             repeat(5) {
@@ -177,6 +153,49 @@ class ActionExecutor(
         return clickNodeOrParent(targetNode)
     }
 
+    private fun search(action: Action): Boolean {
+        // 1. Click the search node to open the search bar
+        action.targetId?.let { id ->
+            val node = NodeRepository.get(id)
+            if (node != null && node.isClickable) {
+                Log.d("BRO_EXECUTOR", "SEARCH: Clicking search icon/bar ID=$id")
+                clickNodeOrParent(node)
+                // Wait for the UI transition (search bar appearing)
+                try { Thread.sleep(1000) } catch (e: Exception) {}
+            }
+        }
+
+        // 2. Find the newly appeared editable search field
+        val root = service.rootInActiveWindow
+        val inputNode = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            ?: findFirstEditableNode(root)
+
+        if (inputNode == null) {
+            Log.e("BRO_EXECUTOR", "SEARCH: Could not find editable input field after clicking search.")
+            return false
+        }
+
+        // 3. Type the query
+        inputNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle().apply {
+            putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                action.text ?: ""
+            )
+        }
+        val setOk = inputNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        
+        if (setOk) {
+            Log.d("BRO_EXECUTOR", "SEARCH: Successfully typed '${action.text}'")
+            // Wait for search results to populate so they appear in the next DOM read
+            try { Thread.sleep(1500) } catch (e: Exception) {}
+            return true
+        }
+
+        Log.e("BRO_EXECUTOR", "SEARCH: Failed to set text on input field.")
+        return false
+    }
+
     private fun type(action: Action): Boolean {
         val targetId = action.targetId
         var node = if (targetId != null) NodeRepository.get(targetId) else null
@@ -188,6 +207,11 @@ class ActionExecutor(
         }
 
         if (node == null) return false
+
+        val nodeDesc = (node.contentDescription?.toString() ?: node.text?.toString() ?: "").lowercase()
+        val hintText = node.hintText?.toString()?.lowercase().orEmpty()
+        val isChatRoomInput = nodeDesc.contains("type a message") || nodeDesc.contains("message_input") ||
+                hintText.contains("type a message") || hintText.contains("message")
 
         node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         if (node.isClickable) {
@@ -205,7 +229,8 @@ class ActionExecutor(
         if (setOk) {
             val typedText = action.text ?: ""
             val activePkg = service.rootInActiveWindow?.packageName?.toString()
-            if (typedText.length >= 2 && activePkg != null) {
+            // ONLY auto-select contact if we typed in a Search bar on Main Screen, NOT inside a chat room!
+            if (typedText.length >= 2 && activePkg != null && !isChatRoomInput) {
                 try {
                     Thread.sleep(800)
                     if (activePkg == "com.whatsapp") {
@@ -222,6 +247,16 @@ class ActionExecutor(
 
         val focused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         return focused?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) ?: false
+    }
+
+    private fun findFirstEditableNode(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (root == null) return null
+        if (root.isEditable) return root
+        for (i in 0 until root.childCount) {
+            val res = findFirstEditableNode(root.getChild(i))
+            if (res != null) return res
+        }
+        return null
     }
 
     private fun selectMessagingContact(searchText: String): Boolean {
@@ -252,9 +287,11 @@ class ActionExecutor(
 
     private fun collectSendImageButtons(node: AccessibilityNodeInfo, out: MutableList<AccessibilityNodeInfo>) {
         val desc = node.contentDescription?.toString().orEmpty().lowercase()
-        if ((desc.contains("send") || desc.contains("sms")) && (node.isClickable || node.parent?.isClickable == true)) {
-            out.add(if (node.isClickable) node else node.parent!!)
-            return
+        val text = node.text?.toString().orEmpty().lowercase()
+        val cls = node.className?.toString().orEmpty()
+
+        if ((desc == "send" || text == "send" || desc.contains("send message")) && (node.isClickable || cls.contains("ImageButton"))) {
+            out.add(node)
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
@@ -312,7 +349,6 @@ class ActionExecutor(
 
         val text = extractAggregateText(node) ?: return -1
 
-        // CRITICAL: Reject "Ask Meta" / "Meta AI" rows so we click the actual contact name, NOT Meta AI!
         if (text.contains("ask meta", ignoreCase = true) ||
             text.contains("meta ai", ignoreCase = true) ||
             text.contains("send message to meta", ignoreCase = true)) {
@@ -328,20 +364,12 @@ class ActionExecutor(
         if (rect.width() < 120 && rect.height() < 120) score -= 30
         if (rect.width() > 500) score += 15
         if (rect.height() in 80..300) score += 10
-        if (node.isClickable) score += 10
-
-        when {
-            text.equals(searchText, ignoreCase = true) -> score += 25
-            text.startsWith(searchText, ignoreCase = true) &&
-                text.length <= searchText.length + 20 -> score += 18
-        }
-
-        if (cls.contains("RelativeLayout") || cls.contains("LinearLayout")) score += 5
-
         return score
     }
 
-    private fun extractAggregateText(node: AccessibilityNodeInfo): String? {
+    private fun extractAggregateText(node: AccessibilityNodeInfo, depth: Int = 0): String? {
+        if (depth > 4) return null
+
         val directText = node.text?.toString()?.trim()
         if (!directText.isNullOrBlank()) return directText
 
@@ -351,8 +379,7 @@ class ActionExecutor(
         val builder = StringBuilder()
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
-            val childText = child.text?.toString()?.trim()
-                ?: child.contentDescription?.toString()?.trim()
+            val childText = extractAggregateText(child, depth + 1)
             if (!childText.isNullOrBlank()) {
                 if (builder.isNotEmpty()) builder.append(" ")
                 builder.append(childText)
@@ -361,83 +388,37 @@ class ActionExecutor(
         return if (builder.isNotEmpty()) builder.toString() else null
     }
 
-    private fun findFirstEditableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (node == null) return null
-        if (node.isEditable) return node
+    private fun collectText(node: AccessibilityNodeInfo?, out: MutableList<String>) {
+        if (node == null) return
+        val t = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
+        if (!t.isNullOrBlank()) out.add(t)
         for (i in 0 until node.childCount) {
-            val found = findFirstEditableNode(node.getChild(i))
-            if (found != null) return found
+            collectText(node.getChild(i), out)
         }
-        return null
-    }
-
-    private fun tapAt(x: Float, y: Float): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val path = Path().apply { moveTo(x, y) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, 100)
-            val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            return service.dispatchGesture(gesture, null, null)
-        }
-        return false
     }
 
     private fun scroll(direction: String?): Boolean {
-        // Guard: If we're on the notification shade / system UI, press BACK to dismiss it and abort scroll
-        val activePkgNow = service.rootInActiveWindow?.packageName?.toString()
-        if (activePkgNow == "com.android.systemui") {
-            Log.w("BRO_EXECUTOR", "Detected notification shade open! Pressing BACK to close it.")
-            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            try { Thread.sleep(800) } catch (e: Exception) {}
-            return true
-        }
+        val isUp = direction?.equals("UP", ignoreCase = true) == true
+        val path = Path()
+        val displayMetrics = service.resources.displayMetrics
+        val startY = if (isUp) displayMetrics.heightPixels * 0.3f else displayMetrics.heightPixels * 0.7f
+        val endY = if (isUp) displayMetrics.heightPixels * 0.7f else displayMetrics.heightPixels * 0.3f
+        val centerX = displayMetrics.widthPixels * 0.5f
 
-        val isDown = direction?.equals("DOWN", ignoreCase = true) ?: true
-        val root = service.rootInActiveWindow ?: return false
+        path.moveTo(centerX, startY)
+        path.lineTo(centerX, endY)
 
-        val scrollableNode = findScrollableNode(root)
-        if (scrollableNode != null) {
-            val scrollAction = if (isDown) {
-                AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-            } else {
-                AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
-            }
-            if (scrollableNode.performAction(scrollAction)) return true
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            val displayMetrics = service.resources.displayMetrics
-            val width = displayMetrics.widthPixels
-            val height = displayMetrics.heightPixels
-
-            val startX = (width / 2).toFloat()
-            // Safe bounds: keep swipe gesture away from the very top of screen
-            // to avoid accidentally triggering the notification shade pull-down
-            val safeTopBound = height * 0.35f
-            val startY = if (isDown) (height * 0.70f) else safeTopBound
-            val endY = if (isDown) safeTopBound else (height * 0.70f)
-
-            val path = Path().apply {
-                moveTo(startX, startY)
-                lineTo(startX, endY)
-            }
-
-            val stroke = GestureDescription.StrokeDescription(path, 0, 350)
-            val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            return service.dispatchGesture(gesture, null, null)
-        }
-
-        return false
+        val stroke = GestureDescription.StrokeDescription(path, 0, 300)
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        return service.dispatchGesture(builder.build(), null, null)
     }
 
-
-    private fun findScrollableNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (node == null) return null
-        if (node.isScrollable) return node
-        for (i in 0 until node.childCount) {
-            val found = findScrollableNode(node.getChild(i))
-            if (found != null) return found
-        }
-        return null
+    private fun tapAt(x: Float, y: Float): Boolean {
+        val path = Path()
+        path.moveTo(x, y)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 100)
+        val builder = GestureDescription.Builder().addStroke(stroke)
+        return service.dispatchGesture(builder.build(), null, null)
     }
 
     private fun back(): Boolean {
@@ -446,15 +427,5 @@ class ActionExecutor(
 
     private fun home(): Boolean {
         return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
-    }
-
-    private fun collectText(node: AccessibilityNodeInfo?, out: MutableList<String>) {
-        if (node == null) return
-        val t = node.text?.toString()?.trim() ?: node.contentDescription?.toString()?.trim()
-        if (!t.isNullOrEmpty()) out.add(t)
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            collectText(child, out)
-        }
     }
 }

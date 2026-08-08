@@ -79,7 +79,7 @@ class BroAccessibilityService : AccessibilityService() {
 
         Log.d(
             "BRO_SCREEN",
-            screenReader.toPrompt(screen)
+            "Event on ${root.packageName}, nodes=${root.childCount}"
         )
     }
 

@@ -1518,6 +1518,21 @@ suspend fun executeGoalWithPlanner(
             continue
         }
 
+        // Goal Completion Check
+        val canonicalOutput = screenReader.toPrompt(screen)
+        val isComplete = com.example.bro.planner.GoalCompletionChecker.isComplete(
+            goal = Goal(goalStr),
+            screen = screen,
+            lastActionType = lastActionType,
+            canonicalOutput = canonicalOutput
+        )
+
+        if (isComplete) {
+            messages.add(Message("✅ Goal completed successfully!", false))
+            returnToBroApp(context)
+            return
+        }
+
         val decision = planner.plan(
 
             goal = Goal(goalStr),
@@ -1530,7 +1545,7 @@ suspend fun executeGoalWithPlanner(
         val thought = decision.thought
 
         // Direct override: If currently on BRO's screen and user goal requires an external app, force OPEN_APP
-        if (screen.packageName == context.packageName && action.type == ActionType.CHAT) {
+        if (screen.packageName == context.packageName && action.type != ActionType.OPEN_APP) {
             val targetApp = when {
                 "whatsapp" in normalizedGoal -> "WhatsApp"
                 "youtube" in normalizedGoal -> "YouTube"
@@ -1593,6 +1608,13 @@ suspend fun executeGoalWithPlanner(
         val actionsToExecute = if (!decision.actions.isNullOrEmpty()) decision.actions else listOf(action)
 
         for ((actionIdx, act) in actionsToExecute.withIndex()) {
+            val validationError = com.example.bro.executor.ActionValidator.validate(act, Goal(goalStr), canonicalOutput)
+            if (validationError != null) {
+                memory.remember(act, false, validationError)
+                messages.add(Message("⚠️ $validationError", false))
+                continue
+            }
+
             if (thought.isNotBlank() && actionIdx == 0) {
                 messages.add(Message("💡 [Step $step] ${act.summary ?: thought}", false))
             } else if (!act.summary.isNullOrBlank() && actionsToExecute.size > 1) {
@@ -1693,6 +1715,7 @@ suspend fun executeGoalWithPlanner(
 
                 ActionType.CLICK,
                 ActionType.TYPE,
+                ActionType.SEARCH,
                 ActionType.SCROLL,
                 ActionType.SWIPE,
                 ActionType.BACK,
@@ -1758,11 +1781,11 @@ suspend fun executeGoalWithPlanner(
 
                     memory.remember(
                         action,
-                        true,
+                        changed, // Mark as failed if UI didn't change!
                         if (changed)
                             "Action executed and UI changed"
                         else
-                            "Action executed but UI remained unchanged"
+                            "Action executed but UI remained unchanged. ERROR: No progress made. DO NOT REPEAT this action."
                     )
 
                     Log.d(

@@ -6,7 +6,17 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 import json
 import socket
+import sys
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+if sys.platform == "win32":
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 import torch
 from peft import PeftModel
@@ -83,24 +93,31 @@ def load_model():
     if TOKENIZER.pad_token is None:
         TOKENIZER.pad_token = TOKENIZER.eos_token
 
-    print("[LOAD] Loading SmolLM2-360M...")
+    print("[LOAD] Loading SmolLM2-360M-Instruct base model...")
 
     base = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
         torch_dtype=dtype,
     )
 
-    print("[LOAD] Loading BRO LoRA adapter...")
+    use_base_only = os.getenv("USE_BASE_MODEL", "0").lower() in {"1", "true", "yes"}
 
-    MODEL = PeftModel.from_pretrained(
-        base,
-        str(V2_ADAPTER_DIR),
-    )
+    if use_base_only:
+        print("[LOAD] Running BASE model (not fine-tuned)...")
+        MODEL = base
+    else:
+        print("[LOAD] Loading BRO LoRA adapter...")
+        adapter_path = V3_ADAPTER_DIR if V3_ADAPTER_DIR.exists() else V2_ADAPTER_DIR
+        MODEL = PeftModel.from_pretrained(
+            base,
+            str(adapter_path),
+        )
 
     MODEL.to(DEVICE)
     MODEL.eval()
 
-    print("[SUCCESS] BRO fine-tuned model loaded.")
+    print("[SUCCESS] BRO model server ready.")
+
 
 
 def get_local_ip():
@@ -379,11 +396,11 @@ def main():
 
     print()
     print(
-        "BRO App → Provider Mode → LOCAL_PC"
+        "BRO App -> Provider Mode -> LOCAL_PC"
     )
 
     print(
-        f"Local PC URL → "
+        f"Local PC URL -> "
         f"http://{local_ip}:{port}/v1/"
     )
 

@@ -1,5 +1,5 @@
 package com.example.bro.planner
-
+import com.example.bro.model.ScreenState
 import android.util.Log
 import com.example.bro.ChatResponse
 import com.example.bro.agent.AgentMemory
@@ -8,7 +8,6 @@ import com.example.bro.model.ActionType
 import com.example.bro.model.Goal
 import com.example.bro.model.PlannerResponse
 import com.example.bro.accessibility.ScreenReader
-import com.example.bro.model.ScreenState
 import com.example.bro.network.GroqRepository
 import com.google.gson.GsonBuilder
 import com.google.gson.stream.JsonReader
@@ -38,9 +37,12 @@ class GroqPlanner(
         CURRENT APP:
         ${screen.packageName}
         
-        CURRENT SCREEN:
+        SCREEN DATA (READ ONLY)
+        -----------------------
         $screenPrompt
-                """.trimIndent()
+        -----------------------
+        END SCREEN DATA
+        """.trimIndent()
 
         Log.d("GROQ_PLANNER", "Sending prompt to Groq API...")
 
@@ -122,14 +124,20 @@ class GroqPlanner(
             )
             ActionType.CLICK -> Action(
                 type = ActionType.CLICK,
-                targetId = chatResponse.targetId,
+                targetId = chatResponse.nodeId ?: chatResponse.targetId,
                 target = chatResponse.target,
                 summary = replyText
             )
             ActionType.TYPE -> Action(
                 type = ActionType.TYPE,
-                targetId = chatResponse.targetId,
+                targetId = chatResponse.nodeId ?: chatResponse.targetId,
                 text = chatResponse.text,
+                summary = replyText
+            )
+            ActionType.SEARCH -> Action(
+                type = ActionType.SEARCH,
+                targetId = chatResponse.nodeId ?: chatResponse.targetId,
+                text = chatResponse.query ?: chatResponse.text,
                 summary = replyText
             )
             ActionType.SCROLL -> Action(
@@ -231,25 +239,6 @@ class GroqPlanner(
         screen: ScreenState,
         memory: AgentMemory
     ): String {
-        val rawPrompt = screenReader.toPrompt(screen)
-        val processedPrompt = if (rawPrompt.contains("YOU ARE INSIDE THE CHAT")) {
-            rawPrompt.lines().filter { line ->
-                !line.contains("[HEADER - DO NOT CLICK]")
-            }.joinToString("\n")
-        } else {
-            rawPrompt
-        }
-
-        val hasActiveSearchBox = screen.nodes.any { node ->
-            val t = (node.text ?: node.contentDescription ?: "").toString().lowercase()
-            node.editable && (t.contains("name, number") || t.contains("search") || t.contains("type a name"))
-        }
-
-        return buildString {
-            if (hasActiveSearchBox && !processedPrompt.contains("YOU ARE INSIDE THE CHAT")) {
-                appendLine("⚠️ SEARCH BAR IS OPEN: Type the target contact/item name into the [CHAT INPUT BOX - TYPE HERE] element now. DO NOT click contacts below until searched!\n")
-            }
-            append(processedPrompt)
-        }
+        return screenReader.toPrompt(screen)
     }
 }

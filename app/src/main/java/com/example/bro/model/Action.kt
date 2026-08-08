@@ -22,6 +22,8 @@ enum class ActionType {
 
     CHAT,
 
+    SEARCH,
+
     FINISH
 }
 
