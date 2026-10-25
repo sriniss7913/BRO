@@ -20,9 +20,11 @@ object UiCanonicalizer {
         PAYMENT,
         CAMERA,
         VOICE,
+        SWITCH,
         CLICKABLE,
         INPUT,
-        TEXT
+        TEXT,
+        CHAT_HEADER
     }
 
     data class SemanticNode(
@@ -36,6 +38,7 @@ object UiCanonicalizer {
         WHATSAPP_CHAT,
         WHATSAPP_SEARCH_RESULTS,
         WHATSAPP_MAIN,
+        WHATSAPP_CONTACT_PICKER,
         WHATSAPP_PROFILE,
         WHATSAPP_DIALOG,
         UNKNOWN
@@ -47,6 +50,10 @@ object UiCanonicalizer {
         val hasInput = nodes.any { it.role == Role.INPUT }
         val hasChatRow = nodes.any { it.role == Role.CHAT_ROW }
         val hasNewChat = nodes.any { it.role == Role.NEW_CHAT }
+        val hasContactPickerHeader = nodes.any { node ->
+            val text = node.fields["text"]?.lowercase() ?: node.fields["label"]?.lowercase() ?: ""
+            text.contains("select contact") || text.contains("contacts on whatsapp")
+        }
         
         // Detect Dialogs: A few generic text/clickable nodes with OK/Cancel/Allow buttons, no typical whatsapp chrome
         val hasDialogButtons = nodes.any { it.role == Role.CLICKABLE && 
@@ -55,6 +62,7 @@ object UiCanonicalizer {
 
         if (hasDialogButtons && !hasMessageInput && !hasNewChat && !hasChatRow) return ScreenState.WHATSAPP_DIALOG
         if (hasMessageInput) return ScreenState.WHATSAPP_CHAT
+        if (hasContactPickerHeader) return ScreenState.WHATSAPP_CONTACT_PICKER
         if ((hasSearch || hasInput) && hasChatRow) return ScreenState.WHATSAPP_SEARCH_RESULTS
         if ((hasNewChat || hasChatRow) && !hasMessageInput && !hasInput) return ScreenState.WHATSAPP_MAIN
         if (nodes.count { it.role == Role.TEXT } > 3 && !hasMessageInput && !hasInput && !hasSearch) return ScreenState.WHATSAPP_PROFILE
@@ -62,44 +70,90 @@ object UiCanonicalizer {
         return ScreenState.UNKNOWN
     }
 
+    data class CanonicalResult(
+        val prompt: String,
+        val nodes: List<SemanticNode>,
+        val screenState: ScreenState,
+        val availableActions: String
+    )
+
     fun canonicalize(root: AccessibilityNodeInfo?, packageName: String): String {
+        return canonicalizeWithResult(root, packageName).prompt
+    }
+
+    fun canonicalizeWithResult(root: AccessibilityNodeInfo?, packageName: String): CanonicalResult {
         NodeRepository.clear()
         
         if (packageName == "com.example.bro" || packageName.endsWith(".bro")) {
-            return "SCREEN: BRO_MAIN"
+            return CanonicalResult("SCREEN: BRO_MAIN", emptyList(), ScreenState.UNKNOWN, "NONE")
         }
         
-        if (root == null) return "SCREEN: EMPTY"
+        if (root == null) return CanonicalResult("SCREEN: EMPTY", emptyList(), ScreenState.UNKNOWN, "NONE")
 
         val semanticNodes = mutableListOf<SemanticNode>()
         traverseAndDetectRoles(root, semanticNodes)
 
         val screenState = detectScreenState(semanticNodes)
-        val availableActions = when (screenState) {
-            ScreenState.WHATSAPP_CHAT -> "TYPE_MESSAGE, SEND_MESSAGE, BACK"
+        val isWhatsApp = packageName == "com.whatsapp" || packageName.startsWith("com.whatsapp.")
+        val availableActions = if (isWhatsApp) when (screenState) {
+            ScreenState.WHATSAPP_CHAT -> "TYPE, TYPE_MESSAGE, SEND_MESSAGE, BACK"
             ScreenState.WHATSAPP_MAIN -> "SEARCH_CONTACT, OPEN_CHAT"
+            ScreenState.WHATSAPP_CONTACT_PICKER -> "SEARCH_CONTACT, SEARCH, CLICK, BACK, HOME"
             ScreenState.WHATSAPP_SEARCH_RESULTS -> "CLICK_RESULT, CLEAR_SEARCH, BACK"
             ScreenState.WHATSAPP_PROFILE -> "BACK"
             ScreenState.WHATSAPP_DIALOG -> "DISMISS, CLICK_BUTTON"
-            ScreenState.UNKNOWN -> "BACK, HOME" // Restrict from ANY to safe fallbacks
+            ScreenState.UNKNOWN -> buildList {
+                add("BACK")
+                add("HOME")
+                add("CLICK")
+                if (semanticNodes.any { it.role == Role.SEARCH }) {
+                    add("SEARCH")
+                    add("SEARCH_CONTACT")
+                }
+                if (semanticNodes.any { it.role == Role.INPUT || it.role == Role.MESSAGE_INPUT }) add("TYPE")
+            }.distinct().joinToString(", ")
+        } else {
+            buildList {
+                add("CLICK")
+                add("BACK")
+                add("HOME")
+                add("SCROLL")
+                if (semanticNodes.any { it.role == Role.SEARCH }) add("SEARCH")
+                if (semanticNodes.any { it.role == Role.INPUT || it.role == Role.MESSAGE_INPUT }) add("TYPE")
+                if (semanticNodes.any { it.role == Role.SWITCH }) add("CLICK")
+            }.distinct().joinToString(", ")
         }
 
         // Assign IDs and build output
         val sb = StringBuilder()
         sb.append("SCREEN: $packageName\n")
-        sb.append("SCREEN_STATE: ${screenState.name}\n")
+        sb.append("SCREEN_STATE: ${if (isWhatsApp) screenState.name else "GENERIC_APP"}\n")
         sb.append("AVAILABLE_ACTIONS: $availableActions\n\n")
 
         var idCounter = 0
         for (semNode in semanticNodes) {
             val id = idCounter++
             NodeRepository.put(id, semNode.targetNode, semNode.role)
+            val outputFields = semNode.fields.toMutableMap()
+            val directLabel = listOfNotNull(
+                semNode.originalNode.text?.toString(),
+                semNode.originalNode.contentDescription?.toString()
+            ).any(String::isNotBlank)
+            if (!directLabel && "id" !in outputFields) {
+                val resourceId = semNode.originalNode.viewIdResourceName
+                    ?.substringAfter(":id/", missingDelimiterValue = "")
+                    ?.takeIf(String::isNotBlank)
+                    ?: semNode.originalNode.viewIdResourceName
+                        ?.substringAfterLast('/')
+                        ?.takeIf(String::isNotBlank)
+                if (resourceId != null) outputFields["id"] = resourceId
+            }
             
             sb.append("[$id] ${semNode.role.name}")
             
-            if (semNode.fields.isNotEmpty()) {
+            if (outputFields.isNotEmpty()) {
                 sb.append("\n")
-                for ((k, v) in semNode.fields) {
+                for ((k, v) in outputFields) {
                     val safeVal = v.replace("\n", " ").replace("\"", "\\\"")
                     if (v.isNotBlank()) {
                         sb.append("    $k=\"$safeVal\"\n")
@@ -111,11 +165,22 @@ object UiCanonicalizer {
             sb.append("\n")
         }
 
-        return sb.toString().trimEnd()
+        return CanonicalResult(sb.toString().trimEnd(), semanticNodes, screenState, availableActions)
     }
 
     private fun traverseAndDetectRoles(node: AccessibilityNodeInfo?, results: MutableList<SemanticNode>) {
         if (node == null || !node.isVisibleToUser) return
+
+        if (node.isClickable && !isNativeSwitchControl(node) && hasSwitchDescendant(node)) {
+            val fields = genericInteractiveFields(node)
+            if (fields.isNotEmpty()) {
+                results.add(SemanticNode(Role.CLICKABLE, node, node, fields))
+            }
+            for (index in 0 until node.childCount) {
+                collectSwitchDescendants(node.getChild(index), results)
+            }
+            return
+        }
         
         // 1. Try to detect a complex Role
         val role = detectRole(node)
@@ -134,13 +199,13 @@ object UiCanonicalizer {
             node.getBoundsInScreen(bounds)
             if (bounds.width() < 1000 || bounds.height() < 1000 || node.childCount == 0) {
                 val genericRole = if (node.isEditable) Role.INPUT else Role.CLICKABLE
-                val fields = mutableMapOf<String, String>()
-                val allText = extractAllText(node)
-                if (allText.isNotBlank()) fields["label"] = allText
-                
-                val hint = node.hintText?.toString()?.trim()
-                if (!hint.isNullOrBlank()) fields["hint"] = hint
-                
+                val fields = genericInteractiveFields(node)
+                if (genericRole == Role.CLICKABLE && fields.isEmpty()) {
+                    for (i in 0 until node.childCount) {
+                        traverseAndDetectRoles(node.getChild(i), results)
+                    }
+                    return
+                }
                 val target = resolveTarget(node, genericRole)
                 results.add(SemanticNode(genericRole, node, target, fields))
                 return // Stop recursion
@@ -172,6 +237,7 @@ object UiCanonicalizer {
         val desc = node.contentDescription?.toString()?.trim() ?: ""
         val cls = node.className?.toString()?.substringAfterLast(".") ?: ""
         val hint = node.hintText?.toString()?.trim() ?: ""
+        if (isSwitchControl(node)) return Role.SWITCH
         
         // SEARCH
         if (res == "search_bar_inner_layout" && node.isClickable) return Role.SEARCH
@@ -199,15 +265,112 @@ object UiCanonicalizer {
         if (desc.contains("Camera", ignoreCase = true) || res == "camera_btn") return Role.CAMERA
         if (desc.contains("Voice message", ignoreCase = true) || res == "voice_note_btn") return Role.VOICE
         
+        // CHAT HEADER (avoid misinterpreting contact name in conversation header as a contact to select)
+        if (res == "conversation_contact" || res == "contact_photo_view" || res == "conversation_contact_name") return Role.CHAT_HEADER
+        
         // BACK
         if (desc.contains("Back", ignoreCase = true) || res.contains("back")) return Role.BACK
         
         return null
     }
 
+    private fun isSwitchControl(node: AccessibilityNodeInfo): Boolean {
+        if (isNativeSwitchControl(node)) return true
+        val hasOwnLabel = !node.text.isNullOrBlank() ||
+            !node.contentDescription.isNullOrBlank() ||
+            !node.hintText.isNullOrBlank()
+        return node.childCount <= 3 && (node.isClickable || hasOwnLabel) &&
+            (0 until node.childCount).any { index ->
+                val child = node.getChild(index)
+                child != null && isNativeSwitchControl(child)
+            }
+    }
+
+    private fun isNativeSwitchControl(node: AccessibilityNodeInfo): Boolean {
+        fun isSwitchClass(candidate: AccessibilityNodeInfo): Boolean {
+            val className = candidate.className?.toString().orEmpty()
+            return className.contains("Switch", ignoreCase = true) ||
+                className.contains("CheckBox", ignoreCase = true) ||
+                className.contains("ToggleButton", ignoreCase = true)
+        }
+        return node.isCheckable || isSwitchClass(node)
+    }
+
+    private fun hasSwitchDescendant(node: AccessibilityNodeInfo): Boolean =
+        (0 until node.childCount).any { index ->
+            val child = node.getChild(index) ?: return@any false
+            isNativeSwitchControl(child) || hasSwitchDescendant(child)
+        }
+
+    private fun collectSwitchDescendants(
+        node: AccessibilityNodeInfo?,
+        results: MutableList<SemanticNode>
+    ) {
+        if (node == null || !node.isVisibleToUser) return
+        if (isNativeSwitchControl(node)) {
+            results.add(
+                SemanticNode(
+                    Role.SWITCH,
+                    node,
+                    resolveTarget(node, Role.SWITCH),
+                    extractFields(node, Role.SWITCH)
+                )
+            )
+            return
+        }
+        for (index in 0 until node.childCount) {
+            collectSwitchDescendants(node.getChild(index), results)
+        }
+    }
+
+    private fun genericInteractiveFields(node: AccessibilityNodeInfo): Map<String, String> {
+        val fields = linkedMapOf<String, String>()
+        val text = extractAllText(node)
+        if (text.isNotBlank()) {
+            fields["label"] = text
+        } else {
+            val resourceId = node.viewIdResourceName
+                ?.substringAfter(":id/", missingDelimiterValue = "")
+                ?.takeIf(String::isNotBlank)
+                ?: node.viewIdResourceName?.substringAfterLast('/')?.takeIf(String::isNotBlank)
+            if (resourceId != null) fields["id"] = resourceId
+        }
+        node.hintText?.toString()?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?.let { fields["hint"] = it }
+        return fields
+    }
+
     private fun extractFields(node: AccessibilityNodeInfo, role: Role): Map<String, String> {
         val map = mutableMapOf<String, String>()
         when (role) {
+            Role.SWITCH -> {
+                val switchChild = (0 until node.childCount)
+                    .mapNotNull(node::getChild)
+                    .firstOrNull {
+                        it.isCheckable ||
+                            it.className?.toString()?.let { name ->
+                                name.contains("Switch", true) ||
+                                    name.contains("CheckBox", true) ||
+                                    name.contains("ToggleButton", true)
+                            } == true
+                    }
+                val label = listOfNotNull(
+                    node.text?.toString()?.trim(),
+                    node.contentDescription?.toString()?.trim(),
+                    node.hintText?.toString()?.trim()
+                ).firstOrNull(String::isNotBlank)
+                    ?: node.parent?.let(::extractAllText).orEmpty().ifBlank {
+                        extractAllText(node).ifBlank {
+                            node.viewIdResourceName
+                                ?.substringAfter(":id/", missingDelimiterValue = "")
+                                ?.ifBlank { "Toggle" }
+                                ?: "Toggle"
+                        }
+                    }
+                map["label"] = label
+                map["state"] = if ((switchChild ?: node).isChecked || node.isSelected) "ON" else "OFF"
+            }
             Role.SEARCH -> {
                 map["purpose"] = "search chats, contacts, or messages"
             }
@@ -257,6 +420,27 @@ object UiCanonicalizer {
     }
 
     private fun resolveTarget(node: AccessibilityNodeInfo, role: Role): AccessibilityNodeInfo {
+        if (role == Role.SWITCH) {
+            if (isNativeSwitchControl(node) || node.isCheckable) {
+                return node
+            }
+            val control = (0 until node.childCount)
+                .mapNotNull(node::getChild)
+                .firstOrNull {
+                    it.isClickable || it.isCheckable ||
+                        it.className?.toString()?.let { name ->
+                            name.contains("Switch", true) ||
+                                name.contains("CheckBox", true) ||
+                                name.contains("ToggleButton", true)
+                        } == true
+                }
+            if (control != null) return control
+            val switchDescendants = mutableListOf<SemanticNode>()
+            collectSwitchDescendants(node, switchDescendants)
+            if (switchDescendants.isNotEmpty()) return switchDescendants.first().targetNode
+            return node
+        }
+
         // Rule 1: Direct
         if (node.isClickable || node.isEditable) {
             Log.d(TAG, "CANONICAL: ROLE=${role.name} RESOLUTION=rule1_direct CONFIDENCE=HIGH")

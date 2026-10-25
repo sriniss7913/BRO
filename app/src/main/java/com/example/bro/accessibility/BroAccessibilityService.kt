@@ -1,17 +1,28 @@
 package com.example.bro.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+import android.graphics.Bitmap
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.example.bro.executor.ActionExecutor
 import com.example.bro.accessibility.ScreenReader
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
 
 class BroAccessibilityService : AccessibilityService() {
 
     companion object {
         var instance: BroAccessibilityService? = null
             private set
+        @Volatile
+        var screenshotOnlyModeEnabled: Boolean = false
 
         fun isAccessibilityEnabled(context: android.content.Context): Boolean {
             val enabledServices = android.provider.Settings.Secure.getString(
@@ -24,6 +35,7 @@ class BroAccessibilityService : AccessibilityService() {
 
     private lateinit var actionExecutor: ActionExecutor
     private val screenReader = ScreenReader()
+    private val screenshotExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -75,12 +87,12 @@ class BroAccessibilityService : AccessibilityService() {
             }
         }
 
-        val screen = screenReader.read(root)
-
-        Log.d(
-            "BRO_SCREEN",
-            "Event on ${root.packageName}, nodes=${root.childCount}"
-        )
+        if (!screenshotOnlyModeEnabled) {
+            Log.d(
+                "BRO_SCREEN",
+                "Event on ${root.packageName}, nodes=${root.childCount}"
+            )
+        }
     }
 
     override fun onInterrupt() {
@@ -90,6 +102,7 @@ class BroAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         super.onDestroy()
 
+        screenshotExecutor.shutdown()
         instance = null
     }
 
@@ -98,6 +111,52 @@ class BroAccessibilityService : AccessibilityService() {
      */
     fun getRoot(): AccessibilityNodeInfo? {
         return rootInActiveWindow
+    }
+
+    suspend fun captureScreenshotJpeg(): ByteArray? {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+
+        return suspendCancellableCoroutine { continuation ->
+            try {
+                takeScreenshot(
+                    Display.DEFAULT_DISPLAY,
+                    screenshotExecutor,
+                    object : TakeScreenshotCallback {
+                        override fun onSuccess(screenshot: ScreenshotResult) {
+                            val buffer = screenshot.hardwareBuffer
+                            try {
+                                val bitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace)
+                                if (bitmap == null) {
+                                    Log.w("BRO_VISION", "Screenshot could not be converted to a bitmap")
+                                    if (continuation.isActive) continuation.resume(null)
+                                    return
+                                }
+
+                                val jpeg = ByteArrayOutputStream()
+                                val encoded = bitmap.compress(Bitmap.CompressFormat.JPEG, 75, jpeg)
+                                bitmap.recycle()
+                                if (continuation.isActive) {
+                                    continuation.resume(if (encoded) jpeg.toByteArray() else null)
+                                }
+                            } catch (e: Exception) {
+                                Log.e("BRO_VISION", "Screenshot encoding failed: ${e.message}", e)
+                                if (continuation.isActive) continuation.resume(null)
+                            } finally {
+                                buffer.close()
+                            }
+                        }
+
+                        override fun onFailure(errorCode: Int) {
+                            Log.w("BRO_VISION", "Screenshot capture failed with code=$errorCode")
+                            if (continuation.isActive) continuation.resume(null)
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                Log.e("BRO_VISION", "Could not request screenshot: ${e.message}", e)
+                if (continuation.isActive) continuation.resume(null)
+            }
+        }
     }
 
     /**
@@ -113,7 +172,7 @@ class BroAccessibilityService : AccessibilityService() {
         return screenReader.toPrompt(screen)
     }
 
-    fun executeAction(action: com.example.bro.model.Action): Boolean {
+    suspend fun executeAction(action: com.example.bro.model.Action): Boolean {
 
         if (!::actionExecutor.isInitialized) {
             Log.d(

@@ -1,11 +1,24 @@
 package com.example.bro.agent
 
+import android.app.ActivityManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.os.Environment
 import android.util.Log
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.BackendType
+import com.google.ai.edge.litertlm.ActivationDataType
+import com.google.ai.edge.litertlm.ConversationConfig
+import com.google.ai.edge.litertlm.Engine
+import com.google.ai.edge.litertlm.EngineConfig
+import com.google.ai.edge.litertlm.ModelInfo
+import com.google.ai.edge.litertlm.Modality
 import com.google.mediapipe.tasks.genai.llminference.LlmInference
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
@@ -27,12 +40,22 @@ object OnDeviceLlmManager {
 
     private val engineMutex = Mutex()
     private var llmInference: LlmInference? = null
+    private var liteRtLmEngine: Engine? = null
     private var currentModelName: String = ""
     private var currentModelPath: String = ""
+    private var currentLiteRtBackend: String = ""
+    private var currentLiteRtVisionBackend: String = ""
+    private var liteRtVisionConfigured = false
+    private var liteRtCachePath: String = ""
+    private var currentLiteRtSupportsVision: Boolean? = null
+    private var currentLiteRtVisionBackends: List<String> = emptyList()
 
-    val isModelLoaded: Boolean get() = llmInference != null || OnnxNavPredictor.isModelLoaded || currentModelName.isNotBlank()
+    val isModelLoaded: Boolean get() = llmInference != null || liteRtLmEngine != null || OnnxNavPredictor.isModelLoaded
     val loadedModelName: String get() = currentModelName
     val loadedModelPath: String get() = currentModelPath
+    val loadedModelSupportsVision: Boolean? get() = currentLiteRtSupportsVision
+    val loadedModelBackend: String
+        get() = if (currentLiteRtBackend == "GPU") "GPU (FLOAT32 activations)" else currentLiteRtBackend
 
     data class ModelFileInfo(
         val fileName: String,
@@ -40,6 +63,7 @@ object OnDeviceLlmManager {
         val sizeBytes: Long
     )
 
+    @Synchronized
     fun init(context: Context) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         customModelDirPath = prefs.getString(KEY_MODEL_DIR, "/sdcard/BRO/") ?: "/sdcard/BRO/"
@@ -49,8 +73,12 @@ object OnDeviceLlmManager {
         if (savedModelPath.isNotBlank()) {
             val file = File(savedModelPath)
             if (file.exists() && file.isFile) {
-                loadModelByFile(context, file)
-                Log.d(TAG, "Restored selected model from exact path on startup: ${file.absolutePath}")
+                val result = loadModelByFile(context, file)
+                result.onSuccess {
+                    Log.d(TAG, "Restored selected model from exact path on startup: ${file.absolutePath}")
+                }.onFailure {
+                    Log.e(TAG, "Could not restore selected model from ${file.absolutePath}: ${it.message}", it)
+                }
                 return
             }
         }
@@ -58,8 +86,12 @@ object OnDeviceLlmManager {
         if (savedModelName.isNotBlank()) {
             val file = findModelFile(context, savedModelName)
             if (file != null && file.exists()) {
-                loadModelByFile(context, file)
-                Log.d(TAG, "Restored selected model on startup: $savedModelName at ${file.absolutePath}")
+                val result = loadModelByFile(context, file)
+                result.onSuccess {
+                    Log.d(TAG, "Restored selected model on startup: $savedModelName at ${file.absolutePath}")
+                }.onFailure {
+                    Log.e(TAG, "Could not restore selected model '$savedModelName': ${it.message}", it)
+                }
             }
         }
     }
@@ -162,12 +194,15 @@ object OnDeviceLlmManager {
         return result.values.toList()
     }
 
+    @Synchronized
     fun loadModel(context: Context, modelPathOrName: String): Result<String> {
         return try {
-            close()
-
             val modelFile = findModelFile(context, modelPathOrName)
                 ?: return Result.failure(Exception("Model file '$modelPathOrName' not found"))
+
+            if (isAlreadyLoaded(modelFile)) {
+                return Result.success("Model '${modelFile.name}' is already loaded.")
+            }
 
             loadModelByFile(context, modelFile)
         } catch (e: Exception) {
@@ -203,14 +238,101 @@ object OnDeviceLlmManager {
         }
     }
 
+    @Synchronized
     fun loadModelByFile(context: Context, modelFile: File): Result<String> {
         return try {
+            if (isAlreadyLoaded(modelFile)) {
+                return Result.success("Model '${modelFile.name}' is already loaded.")
+            }
+
             close()
             Log.d(TAG, "Loading on-device model: ${modelFile.absolutePath} (${modelFile.length() / 1024} KB)")
+            logAvailableMemory(context, modelFile)
 
             val lowerName = modelFile.name.lowercase()
             val fileName = modelFile.name
             var targetFile = modelFile
+
+            if (lowerName.endsWith(".litertlm")) {
+                targetFile = prepareFileForNativeAccess(context, modelFile)
+                try {
+                    ModelInfo.from(targetFile.absolutePath).use { modelInfo ->
+                        val modalities = modelInfo.inputModalities()
+                        val visionBackends = modelInfo.supportedBackends(Modality.VISION)
+                            .mapNotNull { backend ->
+                                when (backend) {
+                                    BackendType.GPU -> "GPU"
+                                    BackendType.CPU -> "CPU"
+                                    else -> null
+                                }
+                            }
+                        currentLiteRtSupportsVision = modalities.vision
+                        currentLiteRtVisionBackends = visionBackends
+                        Log.i(
+                            TAG,
+                            "LiteRT-LM capabilities for '$fileName': " +
+                                "text=${modalities.text}, vision=${modalities.vision}, " +
+                                "audio=${modalities.audio}, video=${modalities.video}, " +
+                                "visionBackends=${visionBackends.ifEmpty { listOf("runtime default") }}"
+                        )
+                    }
+                } catch (metadataError: Exception) {
+                    currentLiteRtSupportsVision = null
+                    currentLiteRtVisionBackends = emptyList()
+                    Log.e(TAG, "Could not inspect LiteRT-LM capabilities for '$fileName'", metadataError)
+                }
+                val usesGpuBackend = Regex("(?:^|[-_])gpu(?:[-_.]|$)", RegexOption.IGNORE_CASE)
+                    .containsMatchIn(fileName)
+                val backendName = if (usesGpuBackend) "GPU" else "CPU"
+                val cacheDir = if (usesGpuBackend) {
+                    val safeModelName = File(fileName).nameWithoutExtension
+                        .lowercase()
+                        .replace(Regex("[^a-z0-9]+"), "_")
+                        .trim('_')
+                    File(context.cacheDir, "litertlm/${safeModelName}_gpu_float32")
+                } else {
+                    File(context.cacheDir, "litertlm")
+                }
+                if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+                    return Result.failure(Exception("Could not create LiteRT-LM cache directory"))
+                }
+
+                try {
+                    val engine = createLiteRtEngine(
+                        modelPath = targetFile.absolutePath,
+                        backendName = backendName,
+                        cachePath = cacheDir.absolutePath,
+                        enableVision = false
+                    )
+                    engine.initialize()
+                    liteRtLmEngine = engine
+                    currentModelName = fileName
+                    currentModelPath = targetFile.absolutePath
+                    currentLiteRtBackend = backendName
+                    currentLiteRtVisionBackend = ""
+                    liteRtCachePath = cacheDir.absolutePath
+                    liteRtVisionConfigured = false
+                    saveSelectedModel(context, fileName, targetFile.absolutePath)
+                    val precisionLabel = if (usesGpuBackend) " (FLOAT32 activations)" else ""
+                    val visionCapability = when (currentLiteRtSupportsVision) {
+                        true -> "Vision supported"
+                        false -> "Vision not supported by this artifact"
+                        null -> "Vision capability unknown"
+                    }
+                    Log.d(
+                        TAG,
+                        "LiteRT-LM model loaded successfully: $fileName using $backendName backend$precisionLabel; " +
+                            "$visionCapability; vision encoder will be configured only for image requests"
+                    )
+                    return Result.success(
+                        "Loaded LiteRT-LM '$fileName' using $backendName backend$precisionLabel " +
+                            "(${targetFile.length() / 1024 / 1024} MB). $visionCapability."
+                    )
+                } catch (e: Exception) {
+                    close()
+                    return Result.failure(Exception("Could not initialize LiteRT-LM model '$fileName' using $backendName backend: ${e.message}"))
+                }
+            }
 
             if (lowerName.endsWith(".onnx")) {
                 val success = OnnxNavPredictor.loadModel(context, targetFile)
@@ -282,6 +404,23 @@ object OnDeviceLlmManager {
         }
     }
 
+    private fun isAlreadyLoaded(modelFile: File): Boolean {
+        if (!isModelLoaded || currentModelName != modelFile.name) return false
+        val loadedFile = File(currentModelPath)
+        return loadedFile.exists() && loadedFile.length() == modelFile.length()
+    }
+
+    private fun logAvailableMemory(context: Context, modelFile: File) {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return
+        val memoryInfo = ActivityManager.MemoryInfo()
+        activityManager.getMemoryInfo(memoryInfo)
+        Log.i(
+            TAG,
+            "Model load memory snapshot: model=${modelFile.name}, size=${modelFile.length() / (1024 * 1024)} MB, " +
+                "available=${memoryInfo.availMem / (1024 * 1024)} MB, lowMemory=${memoryInfo.lowMemory}"
+        )
+    }
+
     private fun saveSelectedModel(context: Context, modelFileName: String, absolutePath: String) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit()
@@ -290,10 +429,225 @@ object OnDeviceLlmManager {
             .apply()
     }
 
+    private fun createLiteRtEngine(
+        modelPath: String,
+        backendName: String,
+        cachePath: String,
+        enableVision: Boolean,
+        visionBackendName: String = backendName
+    ): Engine {
+        val backend = if (backendName == "GPU") Backend.GPU() else Backend.CPU()
+        val visionBackend = if (visionBackendName == "GPU") Backend.GPU() else Backend.CPU()
+        val activationDataType = if (backendName == "GPU") ActivationDataType.FLOAT32 else null
+        val config = if (enableVision) {
+            EngineConfig(
+                modelPath = modelPath,
+                backend = backend,
+                visionBackend = visionBackend,
+                maxNumImages = 1,
+                cacheDir = cachePath,
+                activationDataType = activationDataType
+            )
+        } else {
+            EngineConfig(
+                modelPath = modelPath,
+                backend = backend,
+                cacheDir = cachePath,
+                activationDataType = activationDataType
+            )
+        }
+        return Engine(config)
+    }
+
+    @Synchronized
+    fun prepareModelForVision(context: Context): String? {
+        if (!isModelLoaded || !currentModelName.endsWith(".litertlm", ignoreCase = true)) {
+            throw IllegalStateException("Vision mode requires a loaded LiteRT-LM model.")
+        }
+        if (currentLiteRtSupportsVision == true) return null
+        if (currentLiteRtSupportsVision != false) {
+            throw IllegalStateException(
+                "Vision support could not be confirmed for '$currentModelName'. Reload the model and check its capability report."
+            )
+        }
+
+        val selectedArtifactName = currentModelName
+        val companionName = selectedArtifactName.replace(
+            Regex("[-_]gpu(?=\\.litertlm$)", RegexOption.IGNORE_CASE),
+            ""
+        )
+        if (companionName == selectedArtifactName) {
+            throw IllegalStateException(
+                "LiteRT-LM model '$selectedArtifactName' does not include image input support."
+            )
+        }
+        val companionFile = findModelFile(context, companionName)
+            ?: throw IllegalStateException(
+                "'$currentModelName' is text-only. Vision requires its multimodal companion '$companionName', which was not found."
+            )
+        val companionSupportsVision = try {
+            val nativeFile = prepareFileForNativeAccess(context, companionFile)
+            ModelInfo.from(nativeFile.absolutePath).use { it.inputModalities().vision }
+        } catch (error: Exception) {
+            throw IllegalStateException(
+                "Could not verify Vision support in '$companionName': ${error.message}",
+                error
+            )
+        }
+        if (!companionSupportsVision) {
+            throw IllegalStateException(
+                "The companion model '$companionName' does not contain a Vision encoder."
+            )
+        }
+
+        loadModelByFile(context, companionFile).getOrThrow()
+        val notice = "The selected GPU artifact '$selectedArtifactName' is text-only. Vision is using its multimodal companion '$companionName' on CPU."
+        Log.i(TAG, notice)
+        return notice
+    }
+
+    private fun enableLiteRtVisionIfNeeded() {
+        if (liteRtVisionConfigured) return
+        if (currentLiteRtSupportsVision == false) {
+            throw IllegalStateException(
+                "LiteRT-LM model '$currentModelName' does not include image input support. " +
+                    "Load a multimodal .litertlm artifact with a Vision encoder."
+            )
+        }
+        val modelPath = currentModelPath
+        if (modelPath.isBlank()) throw IllegalStateException("No LiteRT-LM model path is available for Vision mode.")
+
+        liteRtLmEngine?.close()
+        liteRtLmEngine = null
+        liteRtVisionConfigured = false
+        val visionBackends = (
+            currentLiteRtVisionBackends + listOf(currentLiteRtBackend, "CPU", "GPU")
+        ).distinct()
+        val backendErrors = mutableListOf<String>()
+        var visionEngine: Engine? = null
+
+        for (visionBackendName in visionBackends) {
+            val visionCachePath = File(
+                liteRtCachePath,
+                "vision_${visionBackendName.lowercase()}"
+            )
+            if (!visionCachePath.exists() && !visionCachePath.mkdirs()) {
+                backendErrors.add("$visionBackendName: could not create vision cache directory")
+                continue
+            }
+            var candidate: Engine? = null
+            try {
+                Log.i(TAG, "Initializing '$currentModelName' Vision encoder with $visionBackendName backend")
+                val engine = createLiteRtEngine(
+                    modelPath = modelPath,
+                    backendName = currentLiteRtBackend,
+                    cachePath = visionCachePath.absolutePath,
+                    enableVision = true,
+                    visionBackendName = visionBackendName
+                )
+                candidate = engine
+                engine.initialize()
+                visionEngine = engine
+                currentLiteRtVisionBackend = visionBackendName
+                break
+            } catch (backendError: Exception) {
+                candidate?.let {
+                    try {
+                        it.close()
+                    } catch (closeError: Exception) {
+                        backendError.addSuppressed(closeError)
+                    }
+                }
+                Log.e(TAG, "Vision encoder initialization failed with $visionBackendName backend", backendError)
+                backendErrors.add("$visionBackendName: ${backendError.message ?: backendError.javaClass.simpleName}")
+            }
+        }
+
+        if (visionEngine != null) {
+            liteRtLmEngine = visionEngine
+            liteRtVisionConfigured = true
+            Log.i(TAG, "Vision encoder initialized for '$currentModelName' using $currentLiteRtVisionBackend backend")
+            return
+        }
+
+        val restoreError = try {
+            val textEngine = createLiteRtEngine(
+                modelPath = modelPath,
+                backendName = currentLiteRtBackend,
+                cachePath = liteRtCachePath,
+                enableVision = false
+            )
+            textEngine.initialize()
+            liteRtLmEngine = textEngine
+            null
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to restore text inference after Vision initialization failed", error)
+            error
+        }
+        val details = backendErrors.joinToString("; ")
+        if (restoreError != null) {
+            throw IllegalStateException(
+                "Vision encoder initialization failed for '$currentModelName' ($details), and text inference could not be restored: ${restoreError.message}",
+                restoreError
+            )
+        }
+        throw IllegalStateException(
+            "Could not initialize the Vision encoder for '$currentModelName'. Tried ${visionBackends.joinToString()} backends: $details"
+        )
+    }
+
     suspend fun generateResponse(
         systemPrompt: String,
-        userPrompt: String
-    ): String = engineMutex.withLock {
+        userPrompt: String,
+        imageBytes: ByteArray? = null
+    ): String = withContext(Dispatchers.Default) {
+        engineMutex.withLock {
+
+        if (imageBytes != null) {
+            if (liteRtLmEngine == null) {
+                throw Exception("Vision mode requires a loaded LiteRT-LM model.")
+            }
+            enableLiteRtVisionIfNeeded()
+            val visionEngine = liteRtLmEngine
+                ?: throw Exception("LiteRT-LM Vision engine was not initialized.")
+            return@withLock try {
+                generateLiteRtText(visionEngine, systemPrompt, userPrompt, imageBytes)
+            } catch (visionError: Exception) {
+                Log.e(
+                    TAG,
+                    "Vision inference failed for '$currentModelName' using ${currentLiteRtVisionBackend.ifBlank { "unknown" }} vision backend",
+                    visionError
+                )
+                liteRtLmEngine?.close()
+                liteRtLmEngine = null
+                liteRtVisionConfigured = false
+                try {
+                    val textEngine = createLiteRtEngine(
+                        modelPath = currentModelPath,
+                        backendName = currentLiteRtBackend,
+                        cachePath = liteRtCachePath,
+                        enableVision = false
+                    )
+                    textEngine.initialize()
+                    liteRtLmEngine = textEngine
+                } catch (restoreError: Exception) {
+                    visionError.addSuppressed(restoreError)
+                    throw Exception(
+                        "Vision inference failed and restoring text inference also failed: ${restoreError.message}",
+                        visionError
+                    )
+                }
+                throw Exception(
+                    "Vision inference failed for '$currentModelName' using ${currentLiteRtVisionBackend.ifBlank { "unknown" }} vision backend. " +
+                        "Text inference was restored. Details: ${visionError.message}",
+                    visionError
+                )
+            }
+        }
+
+        liteRtLmEngine?.let { engine ->
+            return@withLock generateLiteRtText(engine, systemPrompt, userPrompt)
+        }
 
         // ONNX path
         if (OnnxNavPredictor.isModelLoaded) {
@@ -365,17 +719,56 @@ object OnDeviceLlmManager {
         Log.d(TAG, "LOCAL MODEL RAW OUTPUT:\n$rawResult")
 
         return@withLock rawResult.trim()
+        }
     }
 
+    private fun generateLiteRtText(
+        engine: Engine,
+        systemPrompt: String,
+        userPrompt: String,
+        imageBytes: ByteArray? = null
+    ): String {
+        val conversation = engine.createConversation(
+            ConversationConfig(systemInstruction = Contents.of(systemPrompt), maxOutputToken = 512)
+        )
+        try {
+            val response = if (imageBytes == null) {
+                conversation.sendMessage(userPrompt)
+            } else {
+                conversation.sendMessage(
+                    Contents.of(Content.ImageBytes(imageBytes), Content.Text(userPrompt))
+                )
+            }
+            return extractLiteRtText(response)
+        } finally {
+            conversation.close()
+        }
+    }
+
+    private fun extractLiteRtText(message: com.google.ai.edge.litertlm.Message): String =
+        message.contents.contents
+            .filterIsInstance<Content.Text>()
+            .joinToString(separator = "") { it.text }
+            .trim()
+
+    @Synchronized
     fun close() {
         try {
             llmInference?.close()
+            liteRtLmEngine?.close()
             OnnxNavPredictor.close()
         } catch (e: Exception) {
             Log.w(TAG, "Error closing model: ${e.message}")
         }
         llmInference = null
+        liteRtLmEngine = null
         currentModelName = ""
         currentModelPath = ""
+        currentLiteRtBackend = ""
+        currentLiteRtVisionBackend = ""
+        liteRtVisionConfigured = false
+        liteRtCachePath = ""
+        currentLiteRtSupportsVision = null
+        currentLiteRtVisionBackends = emptyList()
     }
 }

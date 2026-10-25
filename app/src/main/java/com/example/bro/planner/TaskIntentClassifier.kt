@@ -6,6 +6,17 @@ enum class TaskIntent {
     NAVIGATE   // Open app, navigate, search
 }
 
+enum class RequestRoute {
+    CHAT,
+    ACTION
+}
+
+sealed class UserRequestDecision {
+    data class Chat(val reply: String) : UserRequestDecision()
+    data class Action(val taskGoal: String, val conversationalReply: String? = null) : UserRequestDecision()
+    data class WebSearch(val query: String, val conversationalReply: String? = null) : UserRequestDecision()
+}
+
 object TaskIntentClassifier {
     private val STOP_WORDS = setOf(
         "what", "was", "is", "my", "last", "recent", "message", "messages", "sms",
@@ -43,6 +54,113 @@ object TaskIntentClassifier {
             isRead -> TaskIntent.READ
             else -> TaskIntent.NAVIGATE
         }
+    }
+
+    fun parseRequestRoute(response: String): RequestRoute? {
+        val intent = Regex(
+            "\"intent\"\\s*:\\s*\"(CHAT|ACTION)\"",
+            RegexOption.IGNORE_CASE
+        ).find(response)?.groupValues?.get(1) ?: return null
+        return runCatching { RequestRoute.valueOf(intent.uppercase()) }.getOrNull()
+    }
+
+    fun parseUserRequestDecision(rawResponse: String): UserRequestDecision {
+        val trimmed = rawResponse.trim()
+        val cleanJson = trimmed
+            .removePrefix("```json").removePrefix("```JSON").removePrefix("```")
+            .removeSuffix("```").trim()
+
+        if (cleanJson.startsWith("{") && cleanJson.endsWith("}")) {
+            val jsonObject = runCatching {
+                com.google.gson.JsonParser.parseString(cleanJson).asJsonObject
+            }.getOrNull()
+
+            if (jsonObject != null) {
+                val toolName = jsonObject.get("tool")?.asString?.trim()
+                if (toolName.equals("web_search", ignoreCase = true) ||
+                    toolName.equals("search_web", ignoreCase = true) ||
+                    toolName.equals("webSearch", ignoreCase = true) ||
+                    (jsonObject.has("query") && !jsonObject.has("task"))
+                ) {
+                    val query = jsonObject.get("query")?.asString?.trim().orEmpty()
+                    val reply = jsonObject.get("reply")?.asString?.trim()
+                    if (query.isNotBlank()) {
+                        return UserRequestDecision.WebSearch(query = query, conversationalReply = reply)
+                    }
+                }
+
+                if (toolName.equals("execute_phone_task", ignoreCase = true) ||
+                    jsonObject.has("task")
+                ) {
+                    val task = jsonObject.get("task")?.asString?.trim().orEmpty()
+                    val reply = jsonObject.get("reply")?.asString?.trim()
+                    if (task.isNotBlank()) {
+                        return UserRequestDecision.Action(taskGoal = task, conversationalReply = reply)
+                    }
+                }
+
+                val intent = jsonObject.get("intent")?.asString?.trim()
+                if (intent.equals("ACTION", ignoreCase = true)) {
+                    val task = jsonObject.get("task")?.asString?.trim()
+                    return UserRequestDecision.Action(taskGoal = task ?: trimmed)
+                } else if (intent.equals("CHAT", ignoreCase = true)) {
+                    val reply = jsonObject.get("reply")?.asString?.trim()
+                    return UserRequestDecision.Chat(reply = reply ?: trimmed)
+                }
+            }
+        }
+
+        // Natural conversational plain text response
+        return UserRequestDecision.Chat(reply = trimmed)
+    }
+
+    /**
+     * Checks if the user explicitly commanded a web search or requested online pricing/information.
+     */
+    fun isExplicitWebSearch(prompt: String): Boolean {
+        val lower = prompt.lowercase().trim()
+        val explicitWebPhrases = listOf(
+            "web search", "websearch", "search the web", "search web",
+            "search online", "search on web", "look up on web", "look up online",
+            "do websearch", "do web search", "browse web", "browse the web",
+            "google it", "google this", "search on google", "google search",
+            "search for", "search about"
+        )
+        val isExplicitAppLaunch = lower.startsWith("open ") || lower.startsWith("launch ") || lower.contains("open app") || lower.contains("in app")
+        if (explicitWebPhrases.any { lower.contains(it) } && !isExplicitAppLaunch) return true
+
+        // Product / Price searches on the web (e.g. "search of amazon price", "price on amazon", "check iphone price")
+        val hasPriceOrSearch = lower.contains("search of") || lower.contains("search for") || lower.contains("price") || lower.contains("cost")
+        val hasShoppingSiteOrItem = lower.contains("amazon") || lower.contains("flipkart") || lower.contains("price")
+        if (hasPriceOrSearch && hasShoppingSiteOrItem && !isExplicitAppLaunch) {
+            return true
+        }
+
+        return false
+    }
+
+    /**
+     * Determines whether a conversational user query requires live real-time web facts.
+     */
+    fun requiresWebSearch(prompt: String): Boolean {
+        if (isExplicitWebSearch(prompt)) return true
+        val lower = prompt.lowercase().trim()
+        val searchKeywords = setOf(
+            "weather", "temperature", "forecast",
+            "score", "cricket", "football", "ipl", "match", "who won",
+            "latest news", "today news", "breaking news",
+            "price of", "stock", "crypto", "bitcoin", "amazon price", "flipkart price",
+            "latest movie", "release date", "who is the current", "current president", "current prime minister",
+            "holiday", "holidays", "festival", "festivals", "vacation", "calendar", "election", "who is", "when is"
+        )
+        if (searchKeywords.any { lower.contains(it) }) return true
+
+        val timeTemporal = setOf("today", "yesterday", "tomorrow", "tonight", "current", "latest", "recent")
+        val questionWords = setOf("what", "who", "when", "where", "how much", "which")
+        val hasTemporal = timeTemporal.any { lower.contains(it) }
+        val isQuestion = questionWords.any { lower.startsWith(it) || lower.contains(" $it ") } || lower.endsWith("?")
+
+        return hasTemporal && isQuestion && !lower.contains("alarm") && !lower.contains("message") && !lower.contains("email")
     }
 
     /**

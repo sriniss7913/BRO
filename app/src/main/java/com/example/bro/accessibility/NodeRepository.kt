@@ -14,8 +14,10 @@ object NodeRepository {
         roles.clear()
     }
 
-    fun put(id: Int, node: AccessibilityNodeInfo, role: UiCanonicalizer.Role? = null) {
-        nodes[id] = node
+    fun put(id: Int, node: AccessibilityNodeInfo?, role: UiCanonicalizer.Role? = null) {
+        if (node != null) {
+            nodes[id] = node
+        }
         if (role != null) {
             roles[id] = role
         }
@@ -28,4 +30,10 @@ object NodeRepository {
     fun getRole(id: Int): UiCanonicalizer.Role? {
         return roles[id]
     }
+
+    fun firstByRole(role: UiCanonicalizer.Role): AccessibilityNodeInfo? =
+        roles.entries.firstOrNull { it.value == role }?.key?.let(nodes::get)
+
+    fun idForRole(role: UiCanonicalizer.Role): Int? =
+        roles.entries.firstOrNull { it.value == role }?.key
 }

@@ -9,6 +9,7 @@ import java.util.concurrent.TimeUnit
 object RetrofitClient {
 
     private const val DEFAULT_GROQ_URL = "https://api.groq.com/openai/"
+    const val DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/"
 
     private val logger = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BODY
@@ -16,8 +17,8 @@ object RetrofitClient {
 
     private val client = OkHttpClient.Builder()
         .addInterceptor(logger)
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(45, TimeUnit.SECONDS)
         .build()
 
     val api: GroqApi by lazy {
@@ -27,6 +28,10 @@ object RetrofitClient {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(GroqApi::class.java)
+    }
+
+    val openRouterApi: GroqApi by lazy {
+        createCustomApi(DEFAULT_OPENROUTER_URL)
     }
 
     fun createCustomApi(baseUrl: String): GroqApi {

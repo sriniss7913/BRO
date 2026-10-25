@@ -13,4 +13,6 @@
 
     android:canPerformGestures="true"
 
+    android:canTakeScreenshot="true"
+
     android:accessibilityFlags="flagReportViewIds"/>

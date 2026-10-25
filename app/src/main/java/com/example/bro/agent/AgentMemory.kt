@@ -16,6 +16,19 @@ class AgentMemory {
 
     var lastResult: String = ""
 
+    fun restore(
+        actions: List<Action>,
+        step: Int,
+        success: Boolean? = null,
+        result: String = ""
+    ) {
+        previousActions.clear()
+        previousActions.addAll(actions.takeLast(20))
+        this.step = step.coerceAtLeast(0)
+        lastActionSuccess = success
+        lastResult = result
+    }
+
     fun remember(
         action: Action,
         success: Boolean? = null,

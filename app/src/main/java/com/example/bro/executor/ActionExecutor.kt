@@ -2,8 +2,15 @@ package com.example.bro.executor
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -11,12 +18,13 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.example.bro.accessibility.NodeRepository
 import com.example.bro.model.Action
 import com.example.bro.model.ActionType
+import kotlinx.coroutines.delay
 
 class ActionExecutor(
     private val service: AccessibilityService
 ) {
 
-    fun execute(action: Action): Boolean {
+    suspend fun execute(action: Action): Boolean {
         Log.d(
             "BRO_EXECUTOR",
             "Executing type=${action.type}, targetId=${action.targetId}, text=${action.text}, target=${action.target}"
@@ -26,9 +34,15 @@ class ActionExecutor(
             ActionType.CLICK -> click(action)
             ActionType.TYPE -> type(action)
             ActionType.SEARCH -> search(action)
+            ActionType.SEND_MESSAGE -> sendMessage()
+            ActionType.TOGGLE_QUICK_SETTING -> toggleQuickSetting(
+                action.target ?: action.text,
+                action.desiredState
+            )
             ActionType.SCROLL, ActionType.SWIPE -> scroll(action.text)
             ActionType.BACK -> back()
             ActionType.HOME -> home()
+            ActionType.LOCK_SCREEN -> lockScreen()
             else -> false
         }
 
@@ -37,14 +51,29 @@ class ActionExecutor(
     }
 
     private fun click(action: Action): Boolean {
+        if (action.targetId == null && action.x != null && action.y != null) {
+            return tapAt(action.x, action.y)
+        }
+
         action.targetId?.let { id ->
             val node = NodeRepository.get(id)
             if (node != null) {
+                if (NodeRepository.getRole(id) == com.example.bro.accessibility.UiCanonicalizer.Role.TEXT &&
+                    !node.isClickable && node.parent?.isClickable != true
+                ) {
+                    Log.w("BRO_EXECUTOR", "Rejecting CLICK on non-clickable TEXT nodeId=$id")
+                    return false
+                }
                 Log.d("BRO_EXECUTOR", "CLICK by ID=$id text=${node.text}")
                 val resolved = resolveClickTarget(node)
-                if (clickContactRowAvoidingAvatar(resolved)) return true
+                if (NodeRepository.getRole(id) == com.example.bro.accessibility.UiCanonicalizer.Role.CHAT_ROW &&
+                    clickContactRowAvoidingAvatar(resolved)) return true
                 if (clickNodeOrParent(resolved)) return true
             }
+        }
+
+        if (action.x != null && action.y != null && tapAt(action.x, action.y)) {
+            return true
         }
 
         val targetText = action.target?.trim().orEmpty()
@@ -78,6 +107,244 @@ class ActionExecutor(
         return false
     }
 
+    private fun sendMessage(): Boolean {
+        val root = service.rootInActiveWindow ?: return false
+        val sendButton = findSendButton(root)
+        if (sendButton == null) {
+            Log.w("BRO_EXECUTOR", "SEND_MESSAGE: No Send button was exposed on the current screen.")
+            return false
+        }
+        return clickNodeOrParent(sendButton)
+    }
+
+    private suspend fun toggleQuickSetting(
+        requestedTile: String?,
+        desiredState: Boolean?
+    ): Boolean {
+        val target = requestedTile?.trim()?.takeIf(String::isNotEmpty) ?: run {
+            Log.w("BRO_EXECUTOR", "Quick setting action requires a tile label.")
+            return false
+        }
+        if (target.contains("flash", ignoreCase = true) ||
+            target.contains("torch", ignoreCase = true)
+        ) {
+            return toggleTorch(desiredState)
+        }
+        if (!service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_QUICK_SETTINGS)) {
+            Log.w("BRO_EXECUTOR", "Could not open Quick Settings for '$target'.")
+            return false
+        }
+        delay(800)
+
+        var tile = awaitQuickSettingTile(target, timeoutMs = 2000L)
+        if (tile == null) {
+            Log.d("BRO_EXECUTOR", "Tile '$target' not found on page 1, swiping to page 2...")
+            swipeHorizontal(fromRightToLeft = true)
+            delay(600)
+            tile = awaitQuickSettingTile(target, timeoutMs = 2000L)
+        }
+
+        if (tile != null && selectQuickSettingState(tile, target, desiredState)) {
+            delay(500)
+            dismissConfirmationDialogIfPresent()
+            delay(400)
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+            return true
+        }
+
+        if (target.contains("mobile data", ignoreCase = true) || target.contains("wi-fi", ignoreCase = true)) {
+            val internetTile = awaitQuickSettingTile("Internet", timeoutMs = 1000L)
+            if (internetTile != null && (tapAtNode(internetTile) || clickNodeOrParent(internetTile))) {
+                delay(800)
+                val subTile = awaitQuickSettingTile(target, timeoutMs = 2000L)
+                if (subTile != null && selectQuickSettingState(subTile, target, desiredState)) {
+                    delay(500)
+                    dismissConfirmationDialogIfPresent()
+                    delay(300)
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                    delay(300)
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                    return true
+                }
+            }
+        }
+
+        Log.w("BRO_EXECUTOR", "Quick Settings tile '$target' was not found or could not be clicked.")
+        return false
+    }
+
+    private fun tapAtNode(node: AccessibilityNodeInfo): Boolean {
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (rect.width() > 0 && rect.height() > 0) {
+            return tapAt(rect.centerX().toFloat(), rect.centerY().toFloat())
+        }
+        return false
+    }
+
+    private fun swipeHorizontal(fromRightToLeft: Boolean): Boolean {
+        val metrics = service.resources.displayMetrics
+        val path = Path()
+        val y = metrics.heightPixels * 0.35f
+        val startX = if (fromRightToLeft) metrics.widthPixels * 0.85f else metrics.widthPixels * 0.15f
+        val endX = if (fromRightToLeft) metrics.widthPixels * 0.15f else metrics.widthPixels * 0.85f
+        path.moveTo(startX, y)
+        path.lineTo(endX, y)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 300)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return service.dispatchGesture(gesture, null, null)
+    }
+
+    private fun dismissConfirmationDialogIfPresent(): Boolean {
+        val root = service.rootInActiveWindow ?: return false
+        val button1List = root.findAccessibilityNodeInfosByViewId("android:id/button1")
+        if (button1List.isNotEmpty() && button1List[0].isVisibleToUser) {
+            val btn = button1List[0]
+            Log.d("BRO_EXECUTOR", "Dismissing dialog via android:id/button1 (${btn.text})")
+            if (btn.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+        }
+        val confirmPhrases = listOf("turn off", "turn on", "ok", "confirm", "agree", "yes")
+        val matchingNodes = mutableListOf<AccessibilityNodeInfo>()
+        collectClickableMatchingText(root, confirmPhrases, matchingNodes)
+        val best = matchingNodes.firstOrNull()
+        if (best != null) {
+            Log.d("BRO_EXECUTOR", "Dismissing dialog via text '${best.text}'")
+            if (best.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            return tapAtNode(best)
+        }
+        return false
+    }
+
+    private fun collectClickableMatchingText(
+        node: AccessibilityNodeInfo,
+        phrases: List<String>,
+        out: MutableList<AccessibilityNodeInfo>
+    ) {
+        if (!node.isVisibleToUser) return
+        val text = (node.text?.toString() ?: node.contentDescription?.toString()).orEmpty().trim().lowercase()
+        if (phrases.any { text.equals(it, ignoreCase = true) || (text.contains(it) && text.length <= 15) }) {
+            out.add(node)
+            return
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectClickableMatchingText(child, phrases, out)
+        }
+    }
+
+    private fun toggleTorch(enable: Boolean?): Boolean {
+        if (enable == null) {
+            Log.w("BRO_EXECUTOR", "Flashlight action requires the requested on/off state.")
+            return false
+        }
+        if (service.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Log.e("BRO_EXECUTOR", "Camera permission is required to toggle the flashlight.")
+            return false
+        }
+        return try {
+            val cameraManager = service.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
+                cameraManager.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+            } ?: return false
+            cameraManager.setTorchMode(cameraId, enable)
+            true
+        } catch (e: Exception) {
+            Log.e("BRO_EXECUTOR", "Could not set flashlight state to $enable.", e)
+            false
+        }
+    }
+
+    private fun lockScreen(): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_LOCK_SCREEN)
+        } else {
+            Log.w("BRO_EXECUTOR", "Lock screen global action requires Android 9 or newer.")
+            false
+        }
+
+    private fun selectQuickSettingState(
+        tile: AccessibilityNodeInfo,
+        label: String,
+        desiredState: Boolean?
+    ): Boolean {
+        if (desiredState != null) {
+            val currentState = readQuickSettingState(tile, label)
+            if (currentState == desiredState) {
+                Log.i("BRO_EXECUTOR", "Quick Settings tile '$label' is already in the requested state.")
+                return true
+            }
+        }
+        val tapOk = tapAtNode(tile)
+        if (tapOk) {
+            Log.d("BRO_EXECUTOR", "Toggled quick tile '$label' via physical tap")
+            return true
+        }
+        return clickNodeOrParent(tile)
+    }
+
+    private fun readQuickSettingState(
+        tile: AccessibilityNodeInfo,
+        label: String
+    ): Boolean? {
+        var current: AccessibilityNodeInfo? = tile
+        var combinedLabel = ""
+        repeat(4) {
+            val node = current ?: return@repeat
+            if (node.isCheckable) return node.isChecked
+            combinedLabel += " " + listOfNotNull(
+                node.text?.toString(),
+                node.contentDescription?.toString()
+            ).joinToString(" ")
+            current = node.parent
+        }
+        val stateText = combinedLabel
+            .replace(label, "", ignoreCase = true)
+            .lowercase()
+        return when {
+            Regex("""\b(on|enabled|active|connected)\b""").containsMatchIn(stateText) -> true
+            Regex("""\b(off|disabled|inactive|disconnected)\b""").containsMatchIn(stateText) -> false
+            else -> null
+        }
+    }
+
+    private suspend fun awaitQuickSettingTile(
+        label: String,
+        timeoutMs: Long
+    ): AccessibilityNodeInfo? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            val root = service.rootInActiveWindow
+            if (root != null) {
+                findQuickSettingTile(root, label)?.let { return it }
+            }
+            delay(250)
+        }
+        return null
+    }
+
+    private fun findQuickSettingTile(
+        node: AccessibilityNodeInfo,
+        requestedLabel: String
+    ): AccessibilityNodeInfo? {
+        if (!node.isVisibleToUser) return null
+        for (index in 0 until node.childCount) {
+            val child = node.getChild(index) ?: continue
+            findQuickSettingTile(child, requestedLabel)?.let { return it }
+        }
+
+        val label = listOfNotNull(
+            node.text?.toString(),
+            node.contentDescription?.toString()
+        ).joinToString(" ").replace(Regex("\\s+"), " ").trim()
+        if (label.length <= requestedLabel.length + 60 &&
+            label.contains(requestedLabel, ignoreCase = true)
+        ) {
+            return node
+        }
+        return null
+    }
+
     private fun resolveClickTarget(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
         val cls = node.className?.toString().orEmpty()
         if (!cls.contains("ImageView", ignoreCase = true) &&
@@ -100,10 +367,18 @@ class ActionExecutor(
     }
 
     private fun clickNodeOrParent(startNode: AccessibilityNodeInfo): Boolean {
+        // If startNode has an immediate checkable/switch child, try clicking it directly
+        for (i in 0 until startNode.childCount) {
+            val child = startNode.getChild(i)
+            if (child != null && (child.isCheckable || child.className?.toString()?.contains("Switch", true) == true)) {
+                if (child.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+        }
+
         var node: AccessibilityNodeInfo? = startNode
         repeat(5) {
             val current = node ?: return@repeat
-            if (current.isClickable) {
+            if (current.isClickable || current.isCheckable) {
                 Log.d("BRO_EXECUTOR", "Clicking node text=${current.text} class=${current.className}")
                 if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
             }
@@ -153,42 +428,44 @@ class ActionExecutor(
         return clickNodeOrParent(targetNode)
     }
 
-    private fun search(action: Action): Boolean {
-        // 1. Click the search node to open the search bar
-        action.targetId?.let { id ->
-            val node = NodeRepository.get(id)
-            if (node != null && node.isClickable) {
-                Log.d("BRO_EXECUTOR", "SEARCH: Clicking search icon/bar ID=$id")
-                clickNodeOrParent(node)
-                // Wait for the UI transition (search bar appearing)
-                try { Thread.sleep(1000) } catch (e: Exception) {}
+    private suspend fun search(action: Action): Boolean {
+        val query = action.text?.takeIf(String::isNotBlank) ?: run {
+            Log.w("BRO_EXECUTOR", "SEARCH: Query is blank.")
+            return false
+        }
+        val target = action.targetId?.let(NodeRepository::get)
+            ?: NodeRepository.firstByRole(com.example.bro.accessibility.UiCanonicalizer.Role.SEARCH)
+        var inputNode = target?.takeIf { it.isEditable }
+
+        if (inputNode == null && target != null) {
+            Log.d("BRO_EXECUTOR", "SEARCH: Expanding collapsed search nodeId=${action.targetId}")
+            if (!clickNodeOrParent(target)) {
+                Log.w("BRO_EXECUTOR", "SEARCH: Could not open the search control.")
+                return false
             }
+            delay(600)
         }
 
-        // 2. Find the newly appeared editable search field
         val root = service.rootInActiveWindow
-        val inputNode = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        inputNode = inputNode
+            ?: root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)?.takeIf { it.isEditable }
             ?: findFirstEditableNode(root)
 
         if (inputNode == null) {
-            Log.e("BRO_EXECUTOR", "SEARCH: Could not find editable input field after clicking search.")
+            Log.e("BRO_EXECUTOR", "SEARCH: No editable input appeared after opening the search control.")
             return false
         }
 
-        // 3. Type the query
         inputNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-        val args = Bundle().apply {
-            putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                action.text ?: ""
-            )
-        }
-        val setOk = inputNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        val setOk = resilientSetText(inputNode, query, action.x, action.y)
         
         if (setOk) {
-            Log.d("BRO_EXECUTOR", "SEARCH: Successfully typed '${action.text}'")
-            // Wait for search results to populate so they appear in the next DOM read
-            try { Thread.sleep(1500) } catch (e: Exception) {}
+            Log.d("BRO_EXECUTOR", "SEARCH: Successfully typed '$query'")
+            delay(1500)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val imeAccepted = inputNode.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+                Log.d("BRO_EXECUTOR", "SEARCH: IME enter dispatched=$imeAccepted")
+            }
             return true
         }
 
@@ -196,20 +473,46 @@ class ActionExecutor(
         return false
     }
 
-    private fun type(action: Action): Boolean {
+    private suspend fun type(action: Action): Boolean {
+        if (action.text.isNullOrBlank()) {
+            Log.w("BRO_EXECUTOR", "TYPE action rejected because text is blank.")
+            return false
+        }
+        val typedText = action.text
         val targetId = action.targetId
         var node = if (targetId != null) NodeRepository.get(targetId) else null
+
+        if ((node == null || !node.isEditable) && action.x != null && action.y != null) {
+            if (!tapAt(action.x, action.y)) return false
+            try {
+                Thread.sleep(250)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return false
+            }
+            node = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                ?: return false
+        }
 
         if (node == null || !node.isEditable) {
             val root = service.rootInActiveWindow
             node = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-                ?: findFirstEditableNode(root)
+                ?: if (targetId != null) findFirstEditableNode(root) else null
         }
 
         if (node == null) return false
 
         val nodeDesc = (node.contentDescription?.toString() ?: node.text?.toString() ?: "").lowercase()
         val hintText = node.hintText?.toString()?.lowercase().orEmpty()
+        val nodeRole = targetId?.let(NodeRepository::getRole)
+        val isSearchInput = nodeRole == com.example.bro.accessibility.UiCanonicalizer.Role.SEARCH ||
+            nodeDesc.contains("search") ||
+            hintText.contains("search") ||
+            service.rootInActiveWindow?.packageName?.toString()?.let {
+                it.contains("maps", ignoreCase = true) ||
+                    it.contains("settings", ignoreCase = true) ||
+                    it.contains("google", ignoreCase = true)
+            } == true
         val isChatRoomInput = nodeDesc.contains("type a message") || nodeDesc.contains("message_input") ||
                 hintText.contains("type a message") || hintText.contains("message")
 
@@ -218,21 +521,20 @@ class ActionExecutor(
             node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
         }
 
-        val args = Bundle().apply {
-            putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                action.text ?: ""
-            )
-        }
-
-        val setOk = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        val setOk = resilientSetText(node, typedText, action.x, action.y)
         if (setOk) {
-            val typedText = action.text ?: ""
             val activePkg = service.rootInActiveWindow?.packageName?.toString()
+            if (isSearchInput && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                delay(400)
+                val imeAccepted = node.performAction(
+                    AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id
+                )
+                Log.d("BRO_EXECUTOR", "TYPE: search IME enter dispatched=$imeAccepted")
+            }
             // ONLY auto-select contact if we typed in a Search bar on Main Screen, NOT inside a chat room!
             if (typedText.length >= 2 && activePkg != null && !isChatRoomInput) {
                 try {
-                    Thread.sleep(800)
+                    delay(800)
                     if (activePkg == "com.whatsapp") {
                         selectWhatsAppContact(typedText)
                     } else if (activePkg.contains("messaging") || activePkg.contains("mms")) {
@@ -245,13 +547,108 @@ class ActionExecutor(
             return true
         }
 
-        val focused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        return focused?.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) ?: false
+        return false
+    }
+
+    /**
+     * Google ARTEMIS Multi-Tier Resilient Text Entry Pipeline:
+     * Tier 1: Direct ACTION_SET_TEXT
+     * Tier 2: Clipboard Paste Fallback (ClipboardManager + ACTION_PASTE)
+     * Tier 3: Tap-to-Focus + Delay + ACTION_PASTE / Retry
+     */
+    suspend fun resilientSetText(
+        node: AccessibilityNodeInfo,
+        text: String,
+        fallbackX: Float? = null,
+        fallbackY: Float? = null
+    ): Boolean {
+        // Prepare Tier 1 arguments
+        val args = Bundle().apply {
+            putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                text
+            )
+        }
+
+        // Tier 1: Direct Accessibility ACTION_SET_TEXT
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val tier1Success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+        if (tier1Success && verifyTextApplied(node, text)) {
+            Log.d("BRO_EXECUTOR", "Text entry succeeded via Tier 1 (ACTION_SET_TEXT)")
+            return true
+        }
+        Log.w("BRO_EXECUTOR", "Tier 1 text entry failed or unverified. Trying Tier 2 (Clipboard Paste)...")
+
+        // Tier 2: Clipboard Paste Fallback
+        val clipSuccess = copyToClipboard(text)
+        if (clipSuccess) {
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val pasteOk = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            if (pasteOk && verifyTextApplied(node, text)) {
+                Log.d("BRO_EXECUTOR", "Text entry succeeded via Tier 2 (ACTION_PASTE)")
+                return true
+            }
+
+            // Try paste on currently focused input node
+            val focused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focused != null && focused != node) {
+                if (focused.performAction(AccessibilityNodeInfo.ACTION_PASTE) && verifyTextApplied(focused, text)) {
+                    Log.d("BRO_EXECUTOR", "Text entry succeeded via Tier 2 on focused node")
+                    return true
+                }
+            }
+        }
+        Log.w("BRO_EXECUTOR", "Tier 2 paste failed. Trying Tier 3 (Physical Tap-to-Focus + Paste)...")
+
+        // Tier 3: Physical Tap-to-Focus + Paste Fallback
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        val tapX = fallbackX ?: if (bounds.width() > 0) bounds.centerX().toFloat() else null
+        val tapY = fallbackY ?: if (bounds.height() > 0) bounds.centerY().toFloat() else null
+
+        if (tapX != null && tapY != null) {
+            tapAt(tapX, tapY)
+            delay(250)
+            val reFocused = service.rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: node
+            if (reFocused.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+                Log.d("BRO_EXECUTOR", "Text entry succeeded via Tier 3 (Tap + ACTION_PASTE)")
+                return true
+            }
+            if (reFocused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                Log.d("BRO_EXECUTOR", "Text entry succeeded via Tier 3 (Tap + ACTION_SET_TEXT)")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private fun copyToClipboard(text: String): Boolean {
+        return try {
+            val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            if (clipboard != null) {
+                val clip = ClipData.newPlainText("bro_input", text)
+                clipboard.setPrimaryClip(clip)
+                true
+            } else {
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("BRO_EXECUTOR", "Failed to set clipboard: ${e.message}")
+            false
+        }
+    }
+
+    private fun verifyTextApplied(node: AccessibilityNodeInfo, expectedText: String): Boolean {
+        val currentText = node.text?.toString().orEmpty()
+        if (currentText.contains(expectedText, ignoreCase = true)) return true
+        // If node text wasn't updated in-memory yet or is password/masked, check if non-blank
+        return currentText.isNotBlank() || node.isFocused
     }
 
     private fun findFirstEditableNode(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         if (root == null) return null
-        if (root.isEditable) return root
+        if (root.isVisibleToUser && root.isEditable) return root
         for (i in 0 until root.childCount) {
             val res = findFirstEditableNode(root.getChild(i))
             if (res != null) return res
@@ -289,8 +686,12 @@ class ActionExecutor(
         val desc = node.contentDescription?.toString().orEmpty().lowercase()
         val text = node.text?.toString().orEmpty().lowercase()
         val cls = node.className?.toString().orEmpty()
+        val resourceId = node.viewIdResourceName?.substringAfterLast("/")?.lowercase().orEmpty()
 
-        if ((desc == "send" || text == "send" || desc.contains("send message")) && (node.isClickable || cls.contains("ImageButton"))) {
+        if ((desc == "send" || text == "send" || desc.contains("send message") ||
+                resourceId == "send" || resourceId.contains("send_button")) &&
+            (node.isClickable || cls.contains("ImageButton") || resourceId.isNotBlank())
+        ) {
             out.add(node)
         }
         for (i in 0 until node.childCount) {
@@ -414,6 +815,12 @@ class ActionExecutor(
     }
 
     private fun tapAt(x: Float, y: Float): Boolean {
+        val metrics = service.resources.displayMetrics
+        if (!x.isFinite() || !y.isFinite() || x < 0 || y < 0 ||
+            x >= metrics.widthPixels || y >= metrics.heightPixels) {
+            Log.w("BRO_EXECUTOR", "Skipping tap — out-of-bounds coordinates ($x, $y)")
+            return false
+        }
         val path = Path()
         path.moveTo(x, y)
         val stroke = GestureDescription.StrokeDescription(path, 0, 100)

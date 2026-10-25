@@ -1,2 +1,22 @@
 # BRO
 Personal android assistant
+
+## On-device LiteRT-LM
+
+Copy a compatible `.litertlm` model (such as `gemma4-e2b-it-gpu.litertlm`) to `/sdcard/Download/`, select **On-Device** in Settings, and load the model. LiteRT-LM filenames containing `-gpu` or `_gpu` use the GPU backend; other LiteRT-LM files use CPU. GPU acceleration depends on device and driver support. Screenshot/vision encoding continues to use CPU.
+
+## Execution modes
+
+Recent Accessibility updates include direct CameraManager flashlight toggling (with a Camera permission request), `LOCK_SCREEN`, dialer routing only for explicit call/dial tasks, and fallback resolution for hallucinated package IDs. The DOM exposes IDs for unlabeled controls, omits empty clickables, and separately includes switches inside clickable rows. Planner screen content is compacted within a character budget while keeping recent action history and screen-specific blacklist feedback.
+
+Choose **Accessibility** or **Vision** above the task composer. Accessibility mode uses the accessibility-tree planner and does not switch to screenshots automatically. Vision mode captures a fresh screenshot for each step and sends it only to the loaded multimodal `.litertlm` model; it does not send accessibility-tree data or use a remote provider. The `gemma-4-E2B-it-gpu.litertlm` artifact is text-only; when its matching `gemma-4-E2B-it.litertlm` file is available, Vision mode switches to that multimodal CPU companion and explains the switch. The selected GPU artifact itself does not gain an image encoder. Vision has a separate coordinate-and-gesture executor; the accessibility service is used only for Android screenshot capture and gesture dispatch, and its background screen reader is paused while Vision is selected. For text entry, Vision copies the requested text to the clipboard, focuses and long-presses the screenshot-selected field, then uses the next screenshot to locate the visible Paste control. Accessibility mode's reader and executor remain unchanged.
+
+Before planning, the selected LLM classifies each request as `CHAT` or `ACTION`; there is no keyword-based chat/action gate. `CHAT` receives a plain-text reply, while `ACTION` continues through the selected Accessibility or Vision planner. In Vision mode, both classification and chat use the local LiteRT-LM model without capturing or sending a screenshot. Recent conversation turns are included as context.
+
+Accessibility mode opens the relevant Android Settings panel directly for explicit Location, Wi-Fi, Bluetooth, or Mobile data toggle requests that start in BRO; requests from another app can use `TOGGLE_QUICK_SETTING`. The Quick Settings executor avoids toggling a tile already in the requested state and can open the Internet tile to reach Mobile data when Android exposes it there. Directions requests can launch a Google Maps navigation intent. Accessibility click validation trusts an explicitly selected, current-screen node ID for ordinary controls, while destructive controls remain guarded. The planner receives the last five task steps and screen-specific blacklisted actions; three consecutive unchanged actions trigger bounded app-reopen or BACK recovery. The DOM marks switch state, malformed numeric node IDs are sanitized and range-checked, and `SEND_MESSAGE` clicks the current screen's send control. Search inputs submit through IME Enter when supported, while WhatsApp completion requires a send action, an empty message input, and visible Sent/Delivered status.
+
+Vision execution saves a compact coordinate-inspector JPEG for each accepted model step under `Android/data/com.example.bro/files/logs/vision_debug/`. The image contains a labeled pixel grid and marks any selected x/y point; `bro_task_logs.txt` records the image path for each step.
+
+The Inspector's **Download log to Downloads** button exports a timestamped copy of `bro_task_logs.txt` to the device's public Downloads folder. The original app-private log remains in place.
+
+If a planned action is rejected, fails, or makes no visible progress, BRO feeds that result back to the planner and tries up to two alternate plans. Vision retries screenshot capture when it fails. If retries still cannot proceed, BRO asks for guidance with buttons such as retry, switch modes, or cancel; it does not silently treat the task as complete. The accessibility and Vision system prompts are edited and stored independently in Settings.

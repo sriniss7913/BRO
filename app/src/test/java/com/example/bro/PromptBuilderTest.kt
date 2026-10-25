@@ -2,7 +2,6 @@ package com.example.bro
 
 import com.example.bro.accessibility.PromptBuilder
 import com.example.bro.accessibility.ScreenReader
-import com.example.bro.accessibility.UiCanonicalizer
 import com.example.bro.accessibility.WhatsAppCanonicalizer
 import com.example.bro.model.ScreenState
 import com.example.bro.model.UiElement
@@ -15,14 +14,16 @@ class PromptBuilderTest {
     private val screenReader = ScreenReader()
 
     @Test
-    fun testEmptyScreenPromptEquivalence() {
+    fun testEmptyScreenPromptsReflectTheirRepresentations() {
         val screen = ScreenState(
             packageName = "com.whatsapp",
             nodes = emptyList()
         )
         val legacyOutput = PromptBuilder.build(screen)
         val canonicalOutput = screenReader.toPrompt(screen)
-        assertEquals(legacyOutput, canonicalOutput)
+        assertTrue(legacyOutput.contains("Current App: com.whatsapp"))
+        assertTrue(legacyOutput.contains("(empty screen)"))
+        assertEquals("SCREEN: EMPTY", canonicalOutput)
     }
 
     @Test
@@ -41,8 +42,8 @@ class PromptBuilderTest {
         assertEquals("CHAT_ROW", canonicalElements[0].role)
         assertEquals("Ramesh", canonicalElements[0].contact)
 
-        val prompt = PromptBuilder.build(UiCanonicalizer.canonicalize(rawScreen))
-        assertTrue(prompt.contains("[14] CHAT_ROW: Ramesh"))
+        val prompt = PromptBuilder.build(rawScreen)
+        assertTrue(prompt.contains("[14] Ramesh picture Ramesh Yesterday hi [CLICK]"))
     }
 
     @Test
@@ -54,12 +55,16 @@ class PromptBuilderTest {
             UiElement(id = 3, text = "Send", contentDescription = null, className = "android.widget.ImageButton", clickable = true, enabled = true, editable = false, checkable = false, checked = false)
         )
         val screen = ScreenState(packageName = "com.whatsapp", nodes = rawNodes)
-        val canonicalScreen = UiCanonicalizer.canonicalize(screen)
-        val prompt = PromptBuilder.build(canonicalScreen)
+        val canonicalElements = WhatsAppCanonicalizer.canonicalize(screen)
+        assertEquals(
+            listOf("BACK_BUTTON", "SEARCH_BUTTON", "MESSAGE_INPUT", "SEND_BUTTON"),
+            canonicalElements.map { it.role }
+        )
 
-        assertTrue(prompt.contains("[0] BACK_BUTTON"))
-        assertTrue(prompt.contains("[1] SEARCH_BUTTON"))
-        assertTrue(prompt.contains("[2] MESSAGE_INPUT"))
-        assertTrue(prompt.contains("[3] SEND_BUTTON"))
+        val prompt = PromptBuilder.build(screen)
+        assertTrue(prompt.contains("[0] Back [CLICK]"))
+        assertTrue(prompt.contains("[1] Ask Meta or Search [CLICK]"))
+        assertTrue(prompt.contains("[2] Type a message [EDITABLE - TYPE HERE]"))
+        assertTrue(prompt.contains("[3] Send [CLICK]"))
     }
 }

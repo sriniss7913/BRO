@@ -59,7 +59,13 @@ object TaskPipelineExecutor {
                 userPromptSent = goalStr,
                 rawLlmResponse = "[Bypassed LLM - Handled by Deterministic Fast-Path Pipeline]",
                 parsedAction = "PIPELINE_EXECUTE (Fast Path)",
-                tokenUsage = "0 tokens (Local Execution)"
+                tokenUsage = "0 tokens (Local Execution)",
+                androidCommandExecuted = if (isWhatsAppGoal) {
+                    "launch WhatsApp; ACTION_CLICK(search); ACTION_SET_TEXT(contact); ACTION_CLICK(contact result); ACTION_SET_TEXT(message); ACTION_CLICK(Send)"
+                } else {
+                    "launch app '$targetApp' with Android launch intent"
+                },
+                executionResult = "Deterministic pipeline completed successfully."
             )
         }
 
